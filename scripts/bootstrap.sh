@@ -8,7 +8,8 @@
 
 set -euo pipefail
 
-SKILL_DIR="${HUBMEMORY_SKILL_DIR:-$HOME/.claude/skills/hubmemory}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+SKILL_DIR="${HUBMEMORY_SKILL_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)}"
 HUB_HOME="${HUBMEMORY_HOME:-$HOME/hubmemory}"
 
 export HUBMEMORY_SKILL_DIR="$SKILL_DIR"

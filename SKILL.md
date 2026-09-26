@@ -171,6 +171,7 @@ python3 ~/.claude/skills/hubmemory/scripts/query.py <关键词> --days 7
 | `remember.py` | `add --json` 或 `add --title ... --content ...` | 校验并追加带证据来源的长期记忆 |
 | `task_update.py` | `--agent <name> --task <描述> --status active\|done\|blocked` | 主动声明当前任务状态（多 agent 协调频道） |
 | `task_update.py` | `--list` | 列出所有 agent 的当前任务声明 |
+| `install_skill_links.sh` | `--target all\|claude\|codex` / `--dry-run` | 一份源码安全链接到多个 Agent 的 Skill 目录 |
 | `daily_report.py` | `--date YYYY-MM-DD`（默认昨天） | 手动触发日报 |
 | `monthly_report.py` | `--month YYYY-MM` | 手动触发月度总结 |
 | `report_due.py` | `list` / `claim` / `complete` | 跨 agent 领取和完成待汇总报告 |
@@ -183,6 +184,8 @@ watcher 管理：
 `status.py` 的 `watcher health` 必须为 `healthy`。PID 存活但心跳过期属于假活；`bootstrap.sh` 会自动重启。watcher 同时使用文件事件和周期增量扫描，默认每 15 秒补采一次漏报事件。
 
 `live` 不是历史归档：当天会话全部保留；跨日 stale 会话超过 `retention.live_after_idle_hours`、确认已进入 `daily` 且没有未完成任务声明后，会自动从实时索引和 Markdown 快照中清理。清理不影响事实事件、报告、长期记忆或采集偏移；旧 session 再次产生事件时会自动回到 `live`。
+
+多 Agent 共用时只维护一份源码，并运行 `scripts/install_skill_links.sh` 为 Claude、Codex 创建整目录软链接。安装器会备份冲突目标且可重复执行；`bootstrap.sh` 会从自身脚本位置识别真实 Skill 目录，不要求源码必须位于 `~/.claude/skills`。
 
 ---
 

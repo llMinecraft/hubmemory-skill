@@ -22,25 +22,39 @@ hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claud
 
 ## 安装
 
-### Claude Code
+### 推荐：一份源码供 Claude 和 Codex 共用
 
 ```bash
-mkdir -p ~/.claude/skills
+mkdir -p ~/.local/share
 git clone https://gitee.com/llMinecraft/hubmemory-skill.git \
-  ~/.claude/skills/hubmemory
-bash ~/.claude/skills/hubmemory/scripts/bootstrap.sh
+  ~/.local/share/hubmemory-skill
+bash ~/.local/share/hubmemory-skill/scripts/install_skill_links.sh
+bash ~/.local/share/hubmemory-skill/scripts/bootstrap.sh
 ```
 
-### Codex 共用同一份 Skill
+安装器会创建：
 
-为了避免 Claude 和 Codex 使用两份不同版本，推荐使用软链接：
+```text
+~/.claude/skills/hubmemory -> ~/.local/share/hubmemory-skill
+~/.codex/skills/hubmemory  -> ~/.local/share/hubmemory-skill
+```
+
+如果目标已经存在，安装器不会覆盖内容，而是先移动成同级的时间戳备份，例如 `hubmemory.backup-20260926-103000`。重复执行是幂等的。
+
+可以先预览操作：
 
 ```bash
-mkdir -p ~/.codex/skills
-ln -s ~/.claude/skills/hubmemory ~/.codex/skills/hubmemory
+bash ~/.local/share/hubmemory-skill/scripts/install_skill_links.sh --dry-run
 ```
 
-如果目标路径已经存在，请先自行备份，确认没有需要保留的改动后再替换。
+也可以只安装某个 Agent 的入口：
+
+```bash
+bash scripts/install_skill_links.sh --target claude
+bash scripts/install_skill_links.sh --target codex
+```
+
+如果仓库已经克隆在 `~/.claude/skills/hubmemory`，无需搬迁；直接在仓库内运行 `bash scripts/install_skill_links.sh`，安装器会保留 Claude 原目录，并为 Codex 创建整目录软链接。
 
 ## 接入 Agent 指令
 
@@ -125,7 +139,7 @@ llm:
 ## 更新
 
 ```bash
-cd ~/.claude/skills/hubmemory
+cd ~/.local/share/hubmemory-skill
 git pull --ff-only
 bash scripts/bootstrap.sh
 ```
@@ -144,6 +158,7 @@ launchctl unload ~/Library/LaunchAgents/com.hubmemory.dailyreport.plist
 ```bash
 python3 -m py_compile scripts/*.py
 python3 scripts/test_watcher.py
+bash scripts/test_install_skill_links.sh
 ```
 
 ## 许可证

@@ -28,7 +28,7 @@ from evidence import build_evidence, evidence_text
 HUB_HOME = Path(os.environ.get("HUBMEMORY_HOME", os.path.expanduser("~/hubmemory")))
 SKILL_DIR = Path(os.environ.get(
     "HUBMEMORY_SKILL_DIR",
-    os.path.expanduser("~/.claude/skills/hubmemory"),
+    str(Path(__file__).resolve().parent.parent),
 ))
 DAILY_DIR = HUB_HOME / "daily"
 PROFILE_DIR = HUB_HOME / "profile"
