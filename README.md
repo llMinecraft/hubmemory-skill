@@ -2,6 +2,11 @@
 
 hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claude Code、Codex CLI / Desktop 等工具产生的会话文件，把事件统一归档到 `~/hubmemory`，并提供实时状态、历史检索、日报、月报和长期记忆能力。
 
+官方镜像（内容同步）：
+
+- Gitee：<https://gitee.com/llMinecraft/hubmemory-skill>
+- GitHub：<https://github.com/llMinecraft/hubmemory-skill>
+
 ## 主要能力
 
 - 跨 Agent 会话采集与统一归档
@@ -30,6 +35,13 @@ git clone https://gitee.com/llMinecraft/hubmemory-skill.git \
   ~/.local/share/hubmemory-skill
 bash ~/.local/share/hubmemory-skill/scripts/install_skill_links.sh
 bash ~/.local/share/hubmemory-skill/scripts/bootstrap.sh
+```
+
+也可以从 GitHub 克隆：
+
+```bash
+git clone https://github.com/llMinecraft/hubmemory-skill.git \
+  ~/.local/share/hubmemory-skill
 ```
 
 安装器会创建：
