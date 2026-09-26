@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+.venv/
+venv/
+
+# hubmemory runtime data must never be committed with the skill source.
+config.yaml
+daily/
+live/
+logs/
+memory/
+monthly/
+profile/
+reports/
+state/

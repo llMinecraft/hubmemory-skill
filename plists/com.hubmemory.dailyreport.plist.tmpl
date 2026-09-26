@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hubmemory.dailyreport</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON_BIN__</string>
+        <string>__SKILL_DIR__/scripts/daily_report.py</string>
+        <string>--auto</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HUBMEMORY_HOME</key>
+        <string>__HUB_HOME__</string>
+        <key>HUBMEMORY_SKILL_DIR</key>
+        <string>__SKILL_DIR__</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>7</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HUB_HOME__/logs/daily_report.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HUB_HOME__/logs/daily_report.log</string>
+    <key>WorkingDirectory</key>
+    <string>__HUB_HOME__</string>
+</dict>
+</plist>
