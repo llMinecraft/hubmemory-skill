@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Manage pending daily/monthly report jobs for whichever agent is active next."""
+"""Manage report baselines and optional semantic upgrades.
+
+Daily generation creates a deterministic baseline and marks it done. Agents can
+explicitly reopen that baseline when a richer semantic handoff is warranted.
+"""
 from __future__ import annotations
 
 import argparse
@@ -119,7 +123,13 @@ def claim_request(kind: str, period: str, agent: str, model: str) -> dict:
     return {"ok": True, "request": request}
 
 
-def complete_request(kind: str, period: str, agent: str, model: str) -> dict:
+def complete_request(
+    kind: str,
+    period: str,
+    agent: str,
+    model: str,
+    completion_kind: str = "semantic",
+) -> dict:
     path = request_path(kind, period)
     output_path = (
         HUB_HOME / "daily" / period / "diary.md"
@@ -143,6 +153,7 @@ def complete_request(kind: str, period: str, agent: str, model: str) -> dict:
             "completed_at": timestamp(),
             "completed_by": agent,
             "completed_model": model,
+            "completion_kind": completion_kind,
         })
         write_request(path, request)
     finally:
@@ -182,6 +193,12 @@ def main() -> int:
         command.add_argument("--agent", default="unknown")
         command.add_argument("--model", default="unknown")
         command.add_argument("--reason", default="manual retry")
+    sub.choices["complete"].add_argument(
+        "--completion-kind",
+        choices=("semantic", "deterministic"),
+        default="semantic",
+        help="how the report was completed",
+    )
     args = parser.parse_args()
 
     if args.command == "list":
@@ -197,7 +214,13 @@ def main() -> int:
     elif args.command == "claim":
         result = claim_request(args.kind, args.period, args.agent, args.model)
     elif args.command == "complete":
-        result = complete_request(args.kind, args.period, args.agent, args.model)
+        result = complete_request(
+            args.kind,
+            args.period,
+            args.agent,
+            args.model,
+            args.completion_kind,
+        )
     else:
         result = reopen_request(args.kind, args.period, args.reason)
     print(json.dumps(result, ensure_ascii=False, indent=2))

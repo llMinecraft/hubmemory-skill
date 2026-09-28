@@ -585,7 +585,24 @@ def main() -> int:
     (daily_target / "diary.md").write_text(diary, encoding="utf-8")
     log(f"wrote diary.md ({'LLM' if used_llm else 'deterministic'})")
     if used_llm:
-        complete_request("daily", str(target), "configured-llm", (config.get("llm") or {}).get("model", "unknown"))
+        complete_request(
+            "daily",
+            str(target),
+            "configured-llm",
+            (config.get("llm") or {}).get("model", "unknown"),
+            "semantic",
+        )
+    else:
+        # The deterministic report is the guaranteed baseline. Agents can still
+        # reopen it later when a richer semantic rewrite is worth the cost.
+        complete_request(
+            "daily",
+            str(target),
+            "deterministic-template",
+            "rules-v2",
+            "deterministic",
+        )
+        log("deterministic diary accepted as baseline; semantic rewrite may reopen it")
 
     if used_llm:
         profile = extract_profile_via_llm(target, events, config)

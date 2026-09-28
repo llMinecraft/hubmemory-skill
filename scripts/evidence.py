@@ -35,6 +35,19 @@ def clip(value: str, limit: int = 600) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def representative(items: list[str], limit: int) -> list[str]:
+    """Select entries across the full session instead of only its opening."""
+    if len(items) <= limit:
+        return items
+    if limit <= 1:
+        return items[-1:]
+    indexes = {
+        round(index * (len(items) - 1) / (limit - 1))
+        for index in range(limit)
+    }
+    return [items[index] for index in sorted(indexes)]
+
+
 def useful_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -105,31 +118,37 @@ def build_evidence(events: list[dict[str, Any]], period: str | None = None) -> l
     records: list[dict[str, Any]] = []
     for session_id, indexed_events in grouped.items():
         session_events = [event for _, event in indexed_events]
-        user_goals = [
+        all_user_goals = [
             clip(useful_text(event.get("text") or ""), 500)
             for event in session_events
             if event.get("role") == "user" and useful_text(event.get("text") or "")
-        ][:5]
+        ]
+        user_goals = representative(all_user_goals, 5)
         assistant_texts = [
             clip(useful_text(event.get("text") or ""), 700)
             for event in session_events
             if event.get("role") == "assistant" and useful_text(event.get("text") or "")
         ]
-        substantive_actions = [text for text in assistant_texts if len(text) >= 60][:12]
+        substantive_actions = representative(
+            [text for text in assistant_texts if len(text) >= 60],
+            12,
+        )
         all_texts = user_goals + assistant_texts
         timestamps = [str(event.get("ts")) for event in session_events if event.get("ts")]
         agent = str(session_events[0].get("agent") or "unknown")
         model = str(session_events[0].get("model") or "unknown")
         cwd = str(session_events[0].get("cwd") or "")
         status = _status(all_texts)
-        results = [
+        all_results = [
             text for text in assistant_texts
             if any(word.lower() in text.lower() for words in STATUS_WORDS.values() for word in words)
-        ][:8]
-        next_steps = [
+        ]
+        results = representative(all_results, 8)
+        all_next_steps = [
             text for text in assistant_texts
             if any(word.lower() in text.lower() for word in STATUS_WORDS["in_progress"])
-        ][:5]
+        ]
+        next_steps = representative(all_next_steps, 5)
         source_ids = [event_id(event, index) for index, event in indexed_events]
         fingerprint = hashlib.sha1(
             f"{period or ''}:{session_id}:{','.join(source_ids)}".encode("utf-8")

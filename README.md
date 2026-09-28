@@ -141,6 +141,8 @@ llm:
 
 `live_after_idle_hours` 是跨日 stale 会话的宽限期。只有已进入 `daily`、没有未完成任务保护且超过宽限期的会话，才会从实时索引和 Markdown 快照中清理。
 
+日报采用两阶段但不阻塞的流程：凌晨先生成无模型依赖的确定性基线并自动标记完成；后续 Agent 如果有足够上下文，可以用 `report_due.py reopen` 重新领取并做语义升级。报告请求中的 `completion_kind` 会记录是 `deterministic` 还是 `semantic`，不会因为没有新 Agent 会话而长期停留在无人处理的草稿状态。
+
 ## 隐私说明
 
 - 会话正文、日报、长期记忆和日志保存在本机 `~/hubmemory`。

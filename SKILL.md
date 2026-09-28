@@ -41,6 +41,8 @@ python3 ~/.claude/skills/hubmemory/scripts/report_due.py complete \
 
 不要把模型私有思考写入报告；报告只记录有证据的目标、实际动作、结果、状态和下一步。一个 agent 已领取的任务不要重复处理。
 
+日报脚本会先生成一个无模型依赖的确定性基线并自动标记为 `done`，保证不会留下无人处理的低质量 pending 草稿。若当前 agent 有足够上下文进行更高质量语义整理，应先执行 `report_due.py reopen`，再领取、重写并完成；完成记录中的 `completion_kind` 会区分 `deterministic` 和 `semantic`。
+
 日报必须先给出 `## 全天总结`，说明当天主要工作主线、已完成事项、未收束事项和全天结论；随后按 agent 和工作事项逐项写出目标、实际完成、关键证据、任务结论、当前状态（已完成/进行中/失败/阻塞）、下一步和来源 session。不要只罗列消息或工具调用。完成日报/月报后，如果证据显示某个结论对未来多个 session 仍然有效，再用 `remember.py add --json` 写入长期记忆。必须提供至少一个 `source_session_ids` 或 `source_event_ids`；一次性任务、猜测和未验证结论不要写入。
 
 ### 当前任务相关记忆

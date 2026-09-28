@@ -196,3 +196,13 @@ echo
 echo "bootstrap OK. Next steps:"
 echo "  python3 $SKILL_DIR/scripts/status.py"
 echo "  python3 $SKILL_DIR/scripts/query.py <关键词>"
+
+# Surface any reports that still need a deliberate semantic upgrade. The
+# deterministic baseline is already finalized, so this is informational.
+PENDING_REPORTS="$($PYTHON_BIN "$SKILL_DIR/scripts/report_due.py" list --json 2>/dev/null || echo '[]')"
+if [ "$PENDING_REPORTS" != "[]" ]; then
+    echo
+    echo "pending report upgrades detected:"
+    echo "$PENDING_REPORTS"
+    echo "  reopen explicitly before rewriting a report"
+fi
