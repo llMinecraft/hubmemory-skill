@@ -7,6 +7,7 @@ without changing the record format or the CLI contract.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -16,12 +17,56 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}|[\u4e00-\u9fff]")
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+SEGMENT_RE = re.compile(r"[A-Za-z0-9_./:-]+|[\u4e00-\u9fff]+")
 SOURCE_WEIGHT = {"memory": 1.6, "evidence": 1.35, "report": 0.65, "session": 0.7, "profile": 1.0}
+
+SYNONYMS = {
+    "日记": ["diary", "daily"], "diary": ["日记", "daily"],
+    "报告": ["report"], "report": ["报告"],
+    "记忆": ["memory", "memories"], "memory": ["记忆"],
+    "技能": ["skill", "skills"], "skill": ["技能"],
+    "昨天": ["yesterday"], "yesterday": ["昨天"],
+    "检索": ["search", "retrieval"], "search": ["检索"],
+    "会话": ["session"], "session": ["会话"],
+}
 
 
 def tokenize(text: str) -> list[str]:
-    return [token.lower() for token in TOKEN_RE.findall(text or "")]
+    """English tokens (lower, plural stripped) + CJK unigrams and bigrams."""
+    tokens: list[str] = []
+    for seg in SEGMENT_RE.findall(text or ""):
+        if CJK_RE.match(seg):
+            tokens.extend(seg)
+            tokens.extend(seg[i:i + 2] for i in range(len(seg) - 1))
+        else:
+            w = seg.lower().strip("._:/-")
+            if len(w) < 2:
+                continue
+            tokens.append(w)
+            if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+                tokens.append(w[:-1])
+    return tokens
+
+
+def expand_synonyms(tokens):
+    out = list(tokens)
+    for t in tokens:
+        for word, syns in SYNONYMS.items():
+            if t in tokenize(word):
+                out.extend(syns)
+    return out
+
+
+def extract_filters(query):
+    filters = {}
+    rest = query
+    for key in ("agent", "date", "source"):
+        m = re.search(key + r":([\w.-]+)", rest)
+        if m:
+            filters[key] = m.group(1)
+            rest = rest.replace(m.group(0), " ")
+    return filters, rest.strip()
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -49,6 +94,12 @@ def _date_from(value: Any) -> date | None:
             return None
 
 
+TOOL_ECHO_RE = re.compile(
+    r"^\[(tool_output|tool_result)\]\s*(\[|Script completed|Chunk ID|Process exited|Output:)",
+    re.I,
+)
+
+
 def _record_text(record: dict[str, Any]) -> str:
     fields = (
         "title", "content", "narrative", "text", "cwd", "agent", "model",
@@ -58,9 +109,12 @@ def _record_text(record: dict[str, Any]) -> str:
     for field in fields:
         value = record.get(field)
         if isinstance(value, list):
-            parts.extend(str(item) for item in value)
+            parts.extend(str(item) for item in value
+                         if not TOOL_ECHO_RE.match(str(item)))
         elif value is not None:
-            parts.append(str(value))
+            v = str(value)
+            if not TOOL_ECHO_RE.match(v):
+                parts.append(v)
     return " ".join(parts)
 
 
@@ -113,12 +167,28 @@ def _metadata_match(record: dict[str, Any], cwd: str | None, agent: str | None) 
     return score
 
 
+def _doc_date(record):
+    d = record.get("period") or _date_from(record.get("ts") or record.get("created_at"))
+    return d.isoformat() if hasattr(d, "isoformat") else (d or "")
+
+
 def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
            cwd: str | None = None, agent: str | None = None) -> list[dict[str, Any]]:
-    query_tokens = tokenize(query)
+    filters, clean_query = extract_filters(query)
+    if agent:
+        filters.setdefault("agent", agent)
+    query_tokens = expand_synonyms(tokenize(clean_query))
     if not query_tokens:
         return []
     docs = iter_documents(hub_home, days)
+    if filters.get("agent"):
+        docs = [d for d in docs if d["record"].get("agent") == filters["agent"]]
+    if filters.get("source"):
+        docs = [d for d in docs if d["source"] == filters["source"]]
+    if filters.get("date"):
+        docs = [d for d in docs if _doc_date(d["record"]) == filters["date"]]
+    if not docs:
+        return []
     document_tokens = [Counter(tokenize(doc["text"])) for doc in docs]
     document_lengths = [sum(tokens.values()) for tokens in document_tokens]
     average_length = max(1.0, sum(document_lengths) / max(1, len(document_lengths)))
@@ -145,9 +215,36 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
         phrase_bonus = 2.5 if query_lower in doc["text"].lower() else 0.0
         metadata = _metadata_match(doc["record"], cwd, agent)
         source_weight = SOURCE_WEIGHT.get(doc["source"], 0.5)
-        score = (lexical + phrase_bonus + metadata) * source_weight
+        recency = 0.0
+        try:
+            dstr = _doc_date(doc["record"])
+            if dstr:
+                age_days = max(0, (date.today() - date.fromisoformat(dstr)).days)
+                recency = max(0.0, 1.0 - age_days / 30.0) * 0.5
+        except (ValueError, TypeError):
+            pass
+        score = (lexical + phrase_bonus + metadata + recency) * source_weight
         record = dict(doc["record"])
         record.update({"_source": doc["source"], "_path": doc["path"], "_score": round(score, 4)})
         ranked.append(record)
-    ranked.sort(key=lambda item: (-item["_score"], str(item.get("period") or item.get("ts") or ""), str(item.get("session_id") or "")))
-    return ranked[: max(1, limit)]
+
+    # Dedup: same source file + same session + same leading content = one hit.
+    # Without this a session seen by both evidence.jsonl and sessions.jsonl
+    # (or backfill dupes) floods the top-N with identical entries.
+    seen_keys = set()
+    deduped = []
+    for item in ranked:
+        body = " ".join(str(
+            item.get("title") or item.get("goals") or item.get("text")
+            or item.get("content") or item.get("narrative") or ""
+        ).split())[:240]
+        key = (
+            item.get("_path"),
+            hashlib.sha1(body.encode("utf-8")).hexdigest()[:12],
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    deduped.sort(key=lambda item: (-item["_score"], str(item.get("period") or item.get("ts") or ""), str(item.get("session_id") or "")))
+    return deduped[: max(1, limit)]

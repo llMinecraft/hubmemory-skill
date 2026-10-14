@@ -7,7 +7,7 @@ explicitly reopen that baseline when a richer semantic handoff is warranted.
 from __future__ import annotations
 
 import argparse
-import fcntl
+import lockutil
 import json
 import os
 import sys
@@ -50,9 +50,7 @@ def write_request(path: Path, request: dict) -> None:
 def locked():
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
-    handle = LOCK_PATH.open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    return handle
+    return lockutil.acquire_lock(LOCK_PATH)
 
 
 def ensure_request(kind: str, period: str, source: list[str] | None = None) -> dict:
@@ -79,8 +77,7 @@ def ensure_request(kind: str, period: str, source: list[str] | None = None) -> d
                 request["source"] = source
         write_request(path, request)
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        lockutil.release_lock(handle)
     return request
 
 
@@ -118,8 +115,7 @@ def claim_request(kind: str, period: str, agent: str, model: str) -> dict:
         })
         write_request(path, request)
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        lockutil.release_lock(handle)
     return {"ok": True, "request": request}
 
 
@@ -157,8 +153,7 @@ def complete_request(
         })
         write_request(path, request)
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        lockutil.release_lock(handle)
     return {"ok": True, "request": request}
 
 
@@ -170,10 +165,11 @@ def reopen_request(kind: str, period: str, reason: str) -> dict:
         if not request:
             return {"ok": False, "error": "request_not_found"}
         request.update({"status": "pending", "reopened_at": timestamp(), "reopen_reason": reason})
+        for field in ("claimed_at", "claimed_by", "claimed_model"):
+            request.pop(field, None)
         write_request(path, request)
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        lockutil.release_lock(handle)
     return {"ok": True, "request": request}
 
 

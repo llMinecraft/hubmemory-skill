@@ -211,3 +211,54 @@ watcher 管理：
 - 检索结果只注入前 N 条；不要每次工具调用都注入，避免上下文和 token 被历史淹没。
 
 **排障**：先看 `~/hubmemory/logs/watcher.log`，数据结构详见 [references/data_schema.md](~/.claude/skills/hubmemory/references/data_schema.md)
+
+## v2 — 分层记忆与低成本读取协议
+
+> 目标：任何 AI 进门用最少 token 拿到最全所需记忆。全量做索引，按需取正文。
+
+### 读取层级（L0 → L2）
+
+| 层 | 位置 | 规模 | 何时读 |
+|---|---|---|---|
+| L0 索引 | `~/hubmemory/MANIFEST.md` | ~400 tok | **每个新会话先读**：live 会话、pending 报告、近 7 天一行索引、open loops、长期记忆标题 |
+| L1 摘要 | `daily/<date>/diary.md` 的 `> TL;DR` 行 + `## Agent-readable summary` JSON 块 | ~200 tok/篇 | MANIFEST 命中某天，或问"某天干了什么" |
+| L2 证据 | `evidence.jsonl`、`sessions.jsonl`、diary 正文 | 全量 | 只在 L0/L1 不足以回答时按 `ref` 指针点开 |
+
+### 入口
+
+- 统一启动入口：`scripts/session_start.py`（Codex 由 `~/.codex/AGENTS.md` 调；Claude 由 `SessionStart` hook 调）。它做健康检查、补登缺失日报、刷新 MANIFEST，并打印 `next:` 下一步。
+- **当天日报不可 claim**：`next:` 对当天只提示 in-progress，day rollover 后才可领取，避免半天就定稿。
+
+### 统一 CLI
+
+```bash
+~/.claude/skills/hubmemory/bin/hub <command>
+```
+`start` 会话启动检查 | `status` 状态总览 | `today`/`day <date>` 人读日报 | `search <q>` 预算检索 | `query <q>` 全文检索 | `doctor` 健康自检 | `init` 安装调度器 | `manifest` 打印 L0 索引。
+
+### 跨平台（macOS / Linux / Windows）
+
+- 锁：`lockutil.py` 封装 fcntl（POSIX）/ msvcrt（Windows），report_due/remember 共用。
+- 进程检查：`pid_alive` POSIX 用 `os.kill(pid,0)`，Windows 用 `tasklist`。
+- 调度器：`install_scheduler.py` 自动选择 launchd（macOS）/ systemd-user→cron（Linux）/ schtasks（Windows）。
+- 启动：`bootstrap.py`（全平台 Python）+ `bootstrap.ps1`（Windows 包装）。`bootstrap.sh` 仅 macOS/Linux。
+- 回归：`smoke_test.py` 覆盖锁、tokenizer、过滤器、manifest 解析（JSON 块优先 + prose fallback）。
+
+### 检索
+
+- `context.py "<query>" --budget 800`：只回结论行 + `ref` 指针，按 token 预算截断；输出含 `sufficiency`（sufficient/thin）告诉你是否够用。
+- `query.py`：旧接口，返回完整记录，适合人工排查。
+- 问"最近/昨天干了什么"先看 MANIFEST，别先跑全文检索。
+
+### diary 契约（生成方必须遵守）
+
+1. 文件第二行必须是 `> **TL;DR**: …` 一行摘要（任务数、完成/进行中/阻塞计数、主线）。
+2. 末尾必须有 `## Agent-readable summary` 节，内含一个 ```json fenced code block：每项任务的 goal/status/conclusion/session/confidence + `open_loops`。
+3. 每个工作事项保留：工作目标 / 实际动作 / 关键证据 / 任务结论 / 当前状态 / 下一步 / 来源 session。
+4. 证据不足写"证据不足/无法确认"，禁止编造结论；`confidence: low`。
+
+### 写入端密度约束
+
+- 每条记忆一句话，>60 字拆分；只记"做了什么/结果/未完成"，不记过程性废话。
+- 长记忆写入 `memory/memories.jsonl`（带 id），MANIFEST 只索引标题。
+- sessions.jsonl 永远是唯一事实源；manifest/diary/索引都可从它重建。

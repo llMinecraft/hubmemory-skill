@@ -214,6 +214,19 @@ class LiveIndex:
             for sid, events in per_session.items():
                 for evt in events[-LIVE_RECENT_TURNS:]:
                     self.recent[sid].append(evt)
+                # Derive intent from the full session, not just the tail window:
+                # the last-20-turns deque can be all assistant/tool events.
+                entry = self.data.get(sid)
+                if entry is not None:
+                    user_texts = [
+                        _clean_intent_text(e.get("text") or "")
+                        for e in events if e.get("role") == "user"
+                    ]
+                    user_texts = [t for t in user_texts if t]
+                    if user_texts:
+                        if not entry.get("intent"):
+                            entry["intent"] = user_texts[0]
+                        entry["last_user"] = user_texts[-1]
         except OSError:
             pass
 
@@ -237,6 +250,25 @@ class LiveIndex:
                 entry["cwd"] = event["cwd"]
             entry["message_count"] += 1
             self.recent[session_id].append(event)
+            if event.get("role") == "user":
+                text = _clean_intent_text(event.get("text") or "")
+                if text:
+                    if not entry.get("intent"):
+                        entry["intent"] = text
+                    entry["last_user"] = text
+            # Backfill intent/last_user from the recovered turn window when the
+            # index entry predates this feature or restarted without them.
+            if not entry.get("intent") or not entry.get("last_user"):
+                recent_users = [
+                    _clean_intent_text(e.get("text") or "")
+                    for e in self.recent[session_id]
+                    if e.get("role") == "user"
+                ]
+                recent_users = [t for t in recent_users if t]
+                if recent_users:
+                    if not entry.get("intent"):
+                        entry["intent"] = recent_users[0]
+                    entry["last_user"] = recent_users[-1]
 
     def refresh_status(self, now: datetime | None = None) -> None:
         now = now or local_now()
@@ -351,8 +383,19 @@ class LiveIndex:
 
     def dump_session_md(self, session_id: str) -> None:
         with self.lock:
-            entry = dict(self.data.get(session_id, {}))
+            entry = self.data.get(session_id, {})
             events = list(self.recent.get(session_id, []))
+            if entry and (not entry.get("intent") or not entry.get("last_user")):
+                users = [
+                    _clean_intent_text(e.get("text") or "")
+                    for e in events if e.get("role") == "user"
+                ]
+                users = [t for t in users if t]
+                if users:
+                    if not entry.get("intent"):
+                        entry["intent"] = users[0]
+                    entry["last_user"] = users[-1]
+            entry = dict(entry)
         if not entry:
             return
         agent = (entry.get("agent") or "unknown").replace("/", "-")
@@ -364,6 +407,7 @@ class LiveIndex:
             f"- last activity: {entry.get('last_activity')}",
             f"- status: {entry.get('status')}",
             f"- messages: {entry.get('message_count')}",
+            f"- intent: {entry.get('intent') or entry.get('last_user') or '(no user goal captured yet)'}",
             "",
             "## 最近对话",
         ]
@@ -382,6 +426,19 @@ class LiveIndex:
                 lines.append(f"> tool: {tu['name']}({tu.get('input_summary', '')})")
             lines.append("")
         md_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _clean_intent_text(raw: str) -> str:
+    """Extract a short human intent from a user event, skipping injected noise."""
+    text = " ".join((raw or "").split())
+    if not text or len(text) < 3:
+        return ""
+    low = text.lower()
+    noise = ("<environment_context", "<app-context", "# agents.md instructions",
+             "<collaboration_mode", "<heartbeat", "[tool_output]", "[tool_result]")
+    if any(low.startswith(p) or p in low[:200] for p in noise):
+        return ""
+    return text[:200]
 
 
 class DailyWriter:

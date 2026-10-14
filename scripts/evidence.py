@@ -19,6 +19,12 @@ NOISE_PREFIXES = (
     "# agents.md instructions",
     "<collaboration_mode>",
 )
+# Pure tool-echo boilerplate: the event wrapper shows the command output
+# (Script completed / Chunk ID / Process exited) but carries no reasoning.
+TOOL_ECHO_RE = re.compile(
+    r"^\[(tool_output|tool_result)\]\s*(\[|Script completed|Chunk ID|Process exited|Output:)",
+    re.I,
+)
 STATUS_WORDS = {
     "completed": ("已完成", "完成了", "已修复", "通过", "成功", "已验证", "已经好了"),
     "blocked": ("阻塞", "blocked", "无法", "失败", "报错", "未能", "超时"),
@@ -56,6 +62,8 @@ def useful_text(value: Any) -> str:
     if not text or any(lowered.startswith(prefix) for prefix in NOISE_PREFIXES):
         return ""
     if "<heartbeat>" in lowered:
+        return ""
+    if TOOL_ECHO_RE.match(text):
         return ""
     return text
 

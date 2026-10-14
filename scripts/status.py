@@ -19,12 +19,15 @@ REPORT_REQUESTS_DIR = HUB_HOME / "reports" / "requests"
 HEALTH_PATH = HUB_HOME / "state" / "health.json"
 
 
-def check_pid(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+try:
+    from lockutil import pid_alive as check_pid
+except ImportError:
+    def check_pid(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
 
 def check_launchd(label: str) -> str:

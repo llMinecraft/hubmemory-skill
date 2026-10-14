@@ -19,11 +19,12 @@ hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claud
 
 ## 平台与依赖
 
-- macOS（后台服务当前使用 `launchd`）
+- macOS / Linux / Windows
+- 调度器自动选型：launchd（macOS）、systemd-user 退化到 cron（Linux）、schtasks（Windows）
 - Python 3.9+
 - Python 包：`watchdog`、`PyYAML`
 
-`bootstrap.sh` 会检查依赖并在缺失时通过 `pip --user` 安装。
+`bootstrap.py`（全平台 Python 入口）检查依赖并通过 `pip --user` 安装；`bootstrap.sh` 为 macOS/Linux 入口，`bootstrap.ps1` 为 Windows 入口。统一 CLI：`bin/hub`（Windows 用 `bin/hub.bat`）。
 
 ## 安装
 

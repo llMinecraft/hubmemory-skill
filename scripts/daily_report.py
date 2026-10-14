@@ -106,6 +106,7 @@ def _is_context_noise(text: str) -> bool:
         or normalized.startswith("# agents.md instructions")
         or normalized.startswith("<collaboration_mode>")
         or "<heartbeat>" in normalized
+        or re.match(r"^\[(tool_output|tool_result)\]", normalized)
     )
 
 
@@ -310,13 +311,81 @@ def day_overview(evidence: list[dict]) -> list[str]:
     return lines
 
 
+def _clean_files(files):
+    """Drop noise tokens like bare numbers, dotted fragments, home-dir cruft."""
+    out = []
+    seen = set()
+    for f in files or []:
+        f = str(f).strip()
+        if not f or len(f) < 4:
+            continue
+        if re.fullmatch(r"[\d./]+", f):
+            continue
+        if f.startswith(("~", "$", "HOME")) and "/" not in f:
+            continue
+        key = f.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out[:12]
+
+def diary_tldr(target_date, evidence):
+    """One-line headline for the top of diary.md (human + grep friendly)."""
+    if not evidence:
+        return "> **TL;DR**: 当天无结构化工作证据，无法确认任务完成情况"
+    done = [e for e in evidence if e.get("status") == "completed"]
+    blocked = [e for e in evidence if e.get("status") in {"blocked", "failed"}]
+    active = [e for e in evidence if e.get("status") not in {"completed", "blocked", "failed"}]
+    mains = [str((e.get("goals") or ["?"])[0])[:40] for e in evidence[:2]]
+    return (
+        "> **TL;DR**: %d项任务 | 已完成%d 进行中%d 阻塞/失败%d | 主线: %s"
+        % (len(evidence), len(done), len(active), len(blocked), "；".join(mains))
+    )
+
+
+def diary_machine_block(target_date, evidence):
+    """Deterministic JSON summary any agent can parse without reading prose."""
+    tasks = []
+    for e in evidence or []:
+        tasks.append({
+            "goal": (e.get("goals") or [None])[0],
+            "status": e.get("status", "in_progress"),
+            "conclusion": record_conclusion(e)[:300],
+            "agent": e.get("agent"),
+            "model": e.get("model"),
+            "session": e.get("session_id"),
+            "files": (e.get("files") or [])[:10],
+            "next": (e.get("next_steps") or [])[:1] if e.get("status") != "completed" else [],
+            "confidence": "high" if (e.get("confidence") or 0) >= 0.6 else "low",
+        })
+    open_loops = [
+        (e.get("goals") or ["?"])[0]
+        for e in (evidence or [])
+        if e.get("status") != "completed"
+    ]
+    payload = {
+        "date": str(target_date),
+        "task_count": len(tasks),
+        "done": sum(1 for t in tasks if t["status"] == "completed"),
+        "open_loops": open_loops[:8],
+        "tasks": tasks,
+    }
+    return (
+        "\n## Agent-readable summary\n\n"
+        "Machine-parseable digest; evidence chain in daily/%s/evidence.jsonl.\n\n"
+        "```json\n%s\n```\n"
+        % (str(target_date), json.dumps(payload, ensure_ascii=False, indent=2))
+    )
+
+
 def diary_fallback(
     target_date: date,
     events: list[dict],
     contrib: dict,
     evidence: list[dict] | None = None,
 ) -> str:
-    lines = [f"# {target_date} 工作日记", ""]
+    lines = [f"# {target_date} 工作日记", diary_tldr(target_date, evidence), ""]
     if evidence:
         lines.extend(day_overview(evidence))
         lines.append("")
@@ -330,14 +399,14 @@ def diary_fallback(
                 status = item.get("status", "in_progress")
                 lines.extend([
                     f"### 工作事项 · Session {sid[:8]}",
-                    f"- 工作目标：{'；'.join(goals[:3])}",
+                    f"- 工作目标：{'；'.join(_clip(g, 160) for g in goals[:3])}",
                     "- 实际动作：",
-                    *[f"  - {action}" for action in actions[:6]],
-                    f"- 关键证据：{'；'.join((item.get('results') or actions or ['没有明确证据'])[:4])}",
+                    *[f"  - {_clip(action, 240)}" for action in actions[:5]],
+                    f"- 关键证据：{'；'.join(_clip(r, 200) for r in (item.get('results') or actions or ['没有明确证据'])[:4])}",
                     f"- 任务结论：{record_conclusion(item)}",
                     f"- 当前状态：{STATUS_LABELS.get(status, status)}",
                     f"- 下一步：{'；'.join(next_steps[:3]) if status != 'completed' else '无已识别的未完成步骤'}",
-                    f"- 涉及文件/工具：{', '.join((item.get('files') or [])[:20]) or '未识别'}；工具：{', '.join((item.get('tools') or [])[:12]) or '未识别'}",
+                    f"- 涉及文件/工具：{', '.join(_clean_files(item.get('files'))) or '未识别'}；工具：{', '.join((item.get('tools') or [])[:8]) or '未识别'}",
                     f"- 来源：`{sid}`；证据事件数：{len(item.get('source_event_ids') or [])}",
                     "",
                 ])
@@ -408,7 +477,7 @@ def diary_fallback(
     if total > 0:
         for k, v in agent_totals.items():
             lines.append(f"- {k}: {v:,} ({round(v/total*100, 1)}%)")
-    return "\n".join(lines)
+    return "\n".join(lines) + diary_machine_block(target_date, evidence)
 
 
 def extract_profile_via_llm(target_date: date, events: list[dict], config: dict) -> dict | None:
@@ -584,6 +653,12 @@ def main() -> int:
         diary = diary_fallback(target, events, contrib, evidence)
     (daily_target / "diary.md").write_text(diary, encoding="utf-8")
     log(f"wrote diary.md ({'LLM' if used_llm else 'deterministic'})")
+    try:
+        import manifest as manifest_mod
+        manifest_mod.write_manifest()
+        log("refreshed MANIFEST.md")
+    except Exception as exc:
+        log(f"manifest refresh skipped: {exc}")
     if used_llm:
         complete_request(
             "daily",

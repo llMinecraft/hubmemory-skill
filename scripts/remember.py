@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+import lockutil
 import hashlib
 import json
 import os
@@ -64,8 +64,7 @@ def normalize_record(raw: dict[str, Any]) -> dict[str, Any]:
 def append_record(record: dict[str, Any]) -> tuple[bool, str]:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     LOCK_PATH.touch(exist_ok=True)
-    with LOCK_PATH.open("r+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with lockutil.file_lock(LOCK_PATH) as lock:
         try:
             existing: list[dict[str, Any]] = []
             if MEMORY_PATH.exists():
@@ -85,7 +84,7 @@ def append_record(record: dict[str, Any]) -> tuple[bool, str]:
                 os.fsync(output.fileno())
             return True, str(record["id"])
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            pass
 
 
 def main() -> int:
