@@ -208,5 +208,53 @@ class WatcherDurabilityTests(unittest.TestCase):
         self.assertEqual(self.live.data[session_id]["message_count"], 1)
 
 
+class DshInjectedNoiseTests(unittest.TestCase):
+    """DSH injects harness reminders as user-role messages; they are not intent.
+
+    Regression for the DshParser picking '<system-reminder> A skill is a reusable
+    set of task-specific instructions' as a session's 起点/last_user instead of
+    the user's first real prompt.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.hub = self.root / "hub"
+        (self.hub / "state").mkdir(parents=True, exist_ok=True)
+        self.w = load_watcher(self.hub)
+
+    def test_skill_catalog_reminder_is_not_intent(self) -> None:
+        raw = (
+            "<system-reminder>\nA skill is a reusable set of task-specific "
+            "instructions. The following skills are available: office-docx..."
+        )
+        self.assertEqual(self.w._clean_intent_text(raw), "")
+
+    def test_workspace_instruction_reminder_is_not_intent(self) -> None:
+        raw = (
+            "<system-reminder>\nThe following workspace instructions may be "
+            "relevant to your work. Use them as guidance when applicable."
+        )
+        self.assertEqual(self.w._clean_intent_text(raw), "")
+
+    def test_real_prompts_survive_cleaning(self) -> None:
+        self.assertEqual(self.w._clean_intent_text("你好"), "你好")
+        self.assertEqual(self.w._clean_intent_text("动手"), "动手")
+        self.assertEqual(self.w._clean_intent_text("  继续  "), "继续")
+
+    def test_sub_three_char_noise_still_dropped(self) -> None:
+        self.assertEqual(self.w._clean_intent_text("ok"), "")
+        self.assertEqual(self.w._clean_intent_text(">"), "")
+        self.assertEqual(self.w._clean_intent_text("   "), "")
+
+    def test_dsh_parser_noise_matches_reminders_but_not_real_prompts(self) -> None:
+        parser = self.w.DshParser()
+        self.assertTrue(parser.NOISE.search("<system-reminder>\nA skill is a reusable set"))
+        self.assertTrue(parser.NOISE.search("  <system-reminder>\ncurrent dsh file policy"))
+        self.assertTrue(parser.NOISE.search("current runtime context"))
+        self.assertIsNone(parser.NOISE.search("你好"))
+        self.assertIsNone(parser.NOISE.search("把 DSH 接入 hubmemory"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -433,11 +433,19 @@ class LiveIndex:
 def _clean_intent_text(raw: str) -> str:
     """Extract a short human intent from a user event, skipping injected noise."""
     text = " ".join((raw or "").split())
-    if not text or len(text) < 3:
+    if not text:
+        return ""
+    # Two-character CJK prompts ("你好", "动手") are real intent; the 3-char floor
+    # only makes sense for space-separated scripts, where a message that short is
+    # almost always noise. Counting characters rather than bytes, so a 2-char CJK
+    # prompt is not mistaken for a 6-byte string.
+    cjk = sum(1 for ch in text if "\u3400" <= ch <= "\u9fff")
+    if len(text) < 3 and cjk < 2:
         return ""
     low = text.lower()
     noise = ("<environment_context", "<app-context", "# agents.md instructions",
-             "<collaboration_mode", "<heartbeat", "[tool_output]", "[tool_result]")
+             "<collaboration_mode", "<heartbeat", "<system-reminder",
+             "[tool_output]", "[tool_result]")
     if any(low.startswith(p) or p in low[:200] for p in noise):
         return ""
     return text[:200]
@@ -893,7 +901,10 @@ class DshParser:
     """
 
     NOISE = re.compile(
-        r"current runtime context|current dsh file policy|supersedes earlier",
+        r"current runtime context|current dsh file policy|supersedes earlier"
+        r"|^\s*<system-reminder"
+        r"|A skill is a reusable set of task-specific instructions"
+        r"|The following workspace instructions may be relevant",
         re.I,
     )
 
