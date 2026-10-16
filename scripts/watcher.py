@@ -16,7 +16,9 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -881,6 +883,152 @@ class QclawSessionParser:
         return events
 
 
+
+
+class DshParser:
+    """DeepSeek Harness session files live under ~/.dsh/sessions/<ws>/session-*/,
+    stored as zstd-compressed JSONL. Because compressed bytes cannot be read
+    incrementally, we decompress the whole file (cheap, <1s) and diff by line
+    count. 'byte_offset' in the offset store is reused as 'lines processed'.
+    """
+
+    NOISE = re.compile(
+        r"current runtime context|current dsh file policy|supersedes earlier",
+        re.I,
+    )
+
+    def __init__(self):
+        # path -> {"meta": {...session meta...}, "lines": int}
+        self.state: dict[str, dict[str, Any]] = {}
+        self._zstd = self._find_zstd()
+
+    @staticmethod
+    def _find_zstd():
+        try:
+            import zstandard  # noqa: F401
+            return "py"
+        except ImportError:
+            pass
+        for cand in ("zstd", "/opt/homebrew/bin/zstd", "/usr/local/bin/zstd"):
+            try:
+                if subprocess.run([cand, "--version"],
+                                  capture_output=True, timeout=5).returncode == 0:
+                    return cand
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return None
+
+    def decompress(self, path: Path) -> list[str]:
+        """Whole-file decompressed lines. '' on failure / no decoder."""
+        try:
+            if self._zstd == "py":
+                import zstandard
+                data = zstandard.ZstdDecompressor().decompress(path.read_bytes())
+                return data.decode("utf-8", "replace").splitlines()
+            if self._zstd:
+                out = subprocess.run(
+                    [self._zstd, "-dc", str(path)],
+                    capture_output=True, timeout=30,
+                )
+                if out.returncode == 0:
+                    return out.stdout.decode("utf-8", "replace").splitlines()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return []
+
+    @staticmethod
+    def _text_parts(content) -> list[str]:
+        parts = []
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+        elif isinstance(content, str):
+            parts.append(content)
+        return parts
+
+    def events(self, path: Path) -> list[dict]:
+        """Parse new lines since last call; returns normalized events."""
+        path_str = str(path)
+        st = self.state.setdefault(path_str, {"meta": {}, "lines": 0})
+        lines = self.decompress(path)
+        if not lines:
+            return []
+        new_lines = lines[st["lines"]:]
+        st["lines"] = len(lines)
+        events = []
+        meta = st["meta"]
+        for raw in new_lines:
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            t = rec.get("type")
+            data = rec.get("data") or {}
+            if t == "session":
+                meta["session_id"] = rec.get("id") or ""
+                meta["cwd"] = rec.get("cwd") or ""
+                meta["created"] = rec.get("createdAt")
+                continue
+            if t == "agent-preset/selected":
+                meta["preset"] = data.get("agentPreset")
+                continue
+            sid = meta.get("session_id") or ""
+            if not sid:
+                continue
+            ts_ms = rec.get("time")
+            ts = (
+                datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                .astimezone().isoformat(timespec="seconds")
+                if isinstance(ts_ms, (int, float)) else None
+            ) or datetime.now().astimezone().isoformat(timespec="seconds")
+            role, text, tool_uses, tokens = None, "", [], 0
+
+            if t == "user/message":
+                role = "user"
+                text = chr(10).join(self._text_parts(data.get("content")))
+            elif t == "assistant/message":
+                role = "assistant"
+                msg = data.get("message") or {}
+                text = chr(10).join(self._text_parts(msg.get("content")))
+                src = msg.get("source") or {}
+                model = src.get("model") or (src.get("provider") or "")
+                if model:
+                    meta["model"] = model
+                tokens = int(msg.get("tokens_out") or 0)
+            elif t == "tool/call":
+                role = "assistant"
+                tool_uses = [{
+                    "name": data.get("name") or "?",
+                    "input_summary": summarize_input(data.get("arguments")),
+                }]
+            elif t == "tool/result":
+                role = "tool"
+                out = data.get("output") or data.get("result") or ""
+                text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
+                text = text[:400]
+            else:
+                continue
+
+            if role == "user" and self.NOISE.search(text or ""):
+                continue
+            if role is None:
+                continue
+            events.append({
+                "ts": ts,
+                "agent": "dsh",
+                "model": meta.get("model") or meta.get("preset") or "deepseek",
+                "session_id": sid,
+                "cwd": meta.get("cwd") or "",
+                "role": role,
+                "text": text[:2000] if text else "",
+                "tool_uses": tool_uses,
+                "tokens_out": tokens,
+                "source_file": path_str,
+            })
+        return events
+
+
 class SessionProcessor:
     def __init__(self, offsets: OffsetStore, live: LiveIndex, daily: DailyWriter, config: dict[str, Any]):
         self.offsets = offsets
@@ -890,6 +1038,7 @@ class SessionProcessor:
         self.codex_parser = CodexParser()
         self.qclaw_memory_parser = QclawMemoryParser()
         self.qclaw_session_parser = QclawSessionParser()
+        self.dsh_parser = DshParser()
         self.lock = threading.Lock()
 
     def classify(self, file_path: Path) -> str | None:
@@ -905,6 +1054,8 @@ class SessionProcessor:
                 return "claude"
             if key.startswith("codex"):
                 return "codex"
+            if key.startswith("dsh"):
+                return "dsh"
             if key.startswith("qclaw"):
                 return key  # qclaw_memory or qclaw_sessions
             return key
@@ -939,6 +1090,31 @@ class SessionProcessor:
             if events:
                 self.live.flush()
             return
+        if agent == "dsh":
+            try:
+                events = self.dsh_parser.events(file_path)
+            except OSError:
+                return
+            updated = set()
+            for event in events:
+                event["event_id"] = snapshot_event_id(event)
+                if self.daily.append(event):
+                    self.live.update_session(event["session_id"], event)
+                    updated.add(event["session_id"])
+            for sid in updated:
+                self.live.dump_session_md(sid)
+            if events:
+                self.live.flush()
+            # Commit compressed size as the offset so reconcile_once stops
+            # re-processing the same .zstd file every cycle.
+            try:
+                stat = file_path.stat()
+                self.offsets.set(str(file_path), stat.st_ino, stat.st_size)
+                self.offsets.flush()
+            except OSError:
+                pass
+            return
+
         with self.lock:
             path_str = str(file_path)
             try:
@@ -1028,7 +1204,7 @@ class JsonlHandler(FileSystemEventHandler):
 
     def _enqueue(self, path_str: str) -> None:
         p = Path(path_str)
-        if p.suffix in (".jsonl", ".md", ".json"):
+        if p.suffix in (".jsonl", ".md", ".json", ".zstd") or path_str.endswith(".jsonl.zstd"):
             self.q.put(p)
 
     def on_created(self, event) -> None:
@@ -1053,7 +1229,9 @@ def initial_backfill(processor: SessionProcessor, roots: list[Path], days: int) 
             continue
         # 根据 root 对应的 agent 类型决定扫描的文件模式
         agent = processor.classify(root / "placeholder.jsonl")
-        if agent and agent.startswith("qclaw_memory"):
+        if agent == "dsh":
+            patterns = ["*.zstd"]
+        elif agent and agent.startswith("qclaw_memory"):
             patterns = ["*.md"]
         elif agent and agent.startswith("qclaw_sessions"):
             patterns = ["store.json"]
@@ -1099,6 +1277,8 @@ def periodic_flush(
 
 def source_patterns(processor: SessionProcessor, root: Path) -> list[str]:
     agent = processor.classify(root / "placeholder.jsonl")
+    if agent == "dsh":
+        return ["*.zstd"]
     if agent and agent.startswith("qclaw_memory"):
         return ["*.md"]
     if agent and agent.startswith("qclaw_sessions"):

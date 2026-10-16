@@ -1,6 +1,6 @@
 # hubmemory-skill
 
-hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claude Code、Codex CLI / Desktop 等工具产生的会话文件，把事件统一归档到 `~/hubmemory`，并提供实时状态、历史检索、日报、月报和长期记忆能力。
+hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claude Code、Codex CLI / Desktop、DeepSeek Harness(dsh) 等工具产生的会话文件，把事件统一归档到 `~/hubmemory`，并提供实时状态、历史检索、日报、月报和长期记忆能力。
 
 官方镜像（内容同步）：
 
@@ -20,6 +20,7 @@ hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claud
 ## 平台与依赖
 
 - macOS / Linux / Windows
+- Agent 源：claude（~/.claude/projects）、codex（~/.codex/sessions）、dsh（~/.dsh/sessions，.zstd 压缩 jsonl）
 - 调度器自动选型：launchd（macOS）、systemd-user 退化到 cron（Linux）、schtasks（Windows）
 - Python 3.9+
 - Python 包：`watchdog`、`PyYAML`
