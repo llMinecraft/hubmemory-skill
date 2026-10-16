@@ -904,7 +904,10 @@ class DshParser:
         r"current runtime context|current dsh file policy|supersedes earlier"
         r"|^\s*<system-reminder"
         r"|A skill is a reusable set of task-specific instructions"
-        r"|The following workspace instructions may be relevant",
+        r"|The following workspace instructions may be relevant"
+        r"|^Time sampled while preparing turn"
+        r"|^The approval policy changed from"
+        r"|^background job \S+ \(",
         re.I,
     )
 

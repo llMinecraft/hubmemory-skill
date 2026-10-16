@@ -255,6 +255,35 @@ class DshInjectedNoiseTests(unittest.TestCase):
         self.assertIsNone(parser.NOISE.search("你好"))
         self.assertIsNone(parser.NOISE.search("把 DSH 接入 hubmemory"))
 
+    def test_dsh_parser_noise_covers_every_injected_user_message(self) -> None:
+        """Every harness-injected user-role message observed in a real DSH session."""
+        parser = self.w.DshParser()
+        injected = (
+            "Time sampled while preparing turn 12, step 1: 2026-10-16T21:42:22+08:00"
+            "[Asia/Shanghai] Browser time zone for this request: Asia/Shanghai.",
+            'The approval policy changed from "ask" to "never" (changed by the user).',
+            "background job bash-70 (bash: cd english-sprinkles && python3 tools/"
+            "download_data.py 2>&1) finished [status: completed]",
+            "background job bash-88 (bash: cat > /tmp/es_tar.py <<'PYEOF' import time, "
+            "tarfile, urllib.request, io t0=time.",
+        )
+        for text in injected:
+            with self.subTest(text=text[:40]):
+                self.assertTrue(parser.NOISE.search(text))
+
+    def test_real_dsh_prompts_are_not_matched_by_noise(self) -> None:
+        parser = self.w.DshParser()
+        real = (
+            "你好", "动手", "重启吧", "推上去吧", "刚才已经重启了", "把他全部优化了",
+            "没事你来改吧，改完之后就推到远程仓库去",
+            "https://gitee.com/llMinecraft/english-sprinkles.git 这是我仓库的开源项目，你了解一下。",
+            "~/.agents/ 这个目录codex在运行的时候也会扫吗？",
+        )
+        for text in real:
+            with self.subTest(text=text[:24]):
+                self.assertIsNone(parser.NOISE.search(text))
+                self.assertEqual(self.w._clean_intent_text(text), text[:200])
+
 
 if __name__ == "__main__":
     unittest.main()
