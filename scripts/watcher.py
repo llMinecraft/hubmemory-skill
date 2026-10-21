@@ -552,19 +552,33 @@ class DailyWriter:
         if not events:
             return
 
-        # 按 session_id 分组，保留原始时间顺序
+        # conversations.md is a human-readable derivative, not the event log.
+        # Keep every source row in sessions.jsonl; hide empty/tool-only events
+        # here and deduplicate only the SAME event, never text/minute alone.
         grouped: dict[str, list[dict]] = {}
+        seen = set()
         for evt in events:
             sid = evt.get("session_id") or "unknown"
+            identity = (sid, evt.get("event_id"), json.dumps(
+                evt, ensure_ascii=False, sort_keys=True, default=str))
+            if identity in seen:
+                continue
+            seen.add(identity)
             grouped.setdefault(sid, []).append(evt)
+        visible = lambda evt: evt.get("role") in {"user", "assistant"} and bool(
+            str(evt.get("text") or "").strip())
 
         lines = [f"# {d} 会话归档", ""]
-        total_user = sum(1 for e in events if e.get("role") == "user")
-        total_assistant = sum(1 for e in events if e.get("role") == "assistant")
-        lines.append(f"> 共 {len(grouped)} 个 session，{total_user} 条用户消息，{total_assistant} 条 AI 回复")
+        visible_groups = {sid: [e for e in evts if visible(e)] for sid, evts in grouped.items()}
+        visible_groups = {sid: evts for sid, evts in visible_groups.items() if evts}
+        visible_events = [e for evts in visible_groups.values() for e in evts]
+        total_user = sum(e.get("role") == "user" for e in visible_events)
+        total_assistant = sum(e.get("role") == "assistant" for e in visible_events)
+        lines.append(f"> 展示 {len(visible_groups)} 个 session，{total_user} 条用户消息，{total_assistant} 条 AI 回复")
+        lines.append("> 空消息、纯工具事件及精确重复事件不展示；完整记录保留在 sessions.jsonl。")
         lines.append("")
 
-        for sid, evts in grouped.items():
+        for sid, evts in visible_groups.items():
             agent = evts[0].get("agent", "?")
             model = evts[0].get("model", "?")
             cwd = evts[0].get("cwd", "")
@@ -588,7 +602,6 @@ class DailyWriter:
                 text = (evt.get("text") or "").strip()
                 if len(text) > 400:
                     text = text[:400] + "…"
-                tool_uses = evt.get("tool_uses") or []
 
                 if role == "user":
                     lines.append(f"**[{ts_str}] 用户**")
@@ -599,8 +612,6 @@ class DailyWriter:
 
                 if text:
                     lines.append(text)
-                for tu in tool_uses:
-                    lines.append(f"> `{tu.get('name', '?')}` {tu.get('input_summary', '')}")
                 lines.append("")
 
         out_path = self.root / d / "conversations.md"
