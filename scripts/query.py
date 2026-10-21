@@ -37,7 +37,7 @@ def format_hit(item: dict) -> str:
     score = item.get("_score", 0)
     period = item.get("period") or (item.get("ts") or "?")[:10]
     agent = item.get("agent", "?")
-    sid = (item.get("session_id") or "")[:8]
+    sid = item.get("session_id") or ""
     title = item.get("title")
     if not title:
         for field in ("goals", "actions", "results", "text", "content", "narrative"):
@@ -60,6 +60,8 @@ def main() -> int:
     parser.add_argument("--cwd")
     parser.add_argument("--agent")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--as-of", help="ISO historical cutoff, exclusive")
+    parser.add_argument("--exclude-session")
     args = parser.parse_args()
 
     kw = args.keyword.strip()
@@ -67,7 +69,15 @@ def main() -> int:
         print("empty keyword", file=sys.stderr)
         return 2
 
-    hits = search(HUB_HOME, kw, days=max(1, args.days), limit=max(1, args.limit), cwd=args.cwd, agent=args.agent)
+    options = dict(days=max(1, args.days), limit=max(1, args.limit), cwd=args.cwd, agent=args.agent)
+    if args.as_of:
+        options["as_of"] = args.as_of
+    if args.exclude_session:
+        options["exclude_session"] = args.exclude_session
+    try:
+        hits = search(HUB_HOME, kw, **options)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.json:
         print(json.dumps(hits, ensure_ascii=False, indent=2))
     else:
@@ -76,6 +86,12 @@ def main() -> int:
             print(f"== Hybrid results ({len(hits)} hits) ==")
             for hit in hits:
                 print(format_hit(hit))
+                from context import compact_hit
+                compact = compact_hit(hit)
+                print("  ref: %s | event: %s" % (compact["locator"], compact["event_id"] or "-"))
+                print("  delivery (source-reported): %s" % compact["retrieval"].get("delivery_state", "unknown"))
+                for artifact in compact["artifacts"][:3]:
+                    print("  artifact (source-reported): %s" % artifact.get("path"))
                 print()
         else:
             print("(no memory/evidence/session hits)")

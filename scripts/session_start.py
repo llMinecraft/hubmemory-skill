@@ -71,63 +71,101 @@ def watcher_status():
 
 
 def detect_report_gaps():
-    """Enqueue requests for days that have sessions but no diary / request."""
+    """Inspect all available hot/cold dates, not just a rolling hot week."""
+    from report_contract import available_dates, read_daily_text
     enqueued = []
     today_note = None
-    today = datetime.now().date()
-    for i in range(1, 8):  # look back a week
-        day = today - timedelta(days=i)
-        d = day.isoformat()
-        day_dir = DAILY_DIR / d
-        sessions = day_dir / "sessions.jsonl"
-        diary = day_dir / "diary.md"
-        if not sessions.exists() or sessions.stat().st_size == 0:
+    today = datetime.now().date().isoformat()
+    for day in available_dates(HUB_HOME):
+        hot = (DAILY_DIR / day / "sessions.jsonl").exists()
+        req = report_due.read_request(report_due.request_path("daily", day))
+        if not hot:
+            # Index inventory is enough for legacy cold dates; no full-history
+            # decompression or retrospective v2 migration during L0 startup.
+            from cold_storage import iter_day_files
+            inventory = {item["name"] for item in iter_day_files(HUB_HOME, day)}
+            if "sessions.jsonl" not in inventory:
+                continue
+            if "diary.md" in inventory and req.get("contract_version") not in (2, 3):
+                continue
+        elif not (DAILY_DIR / day / "sessions.jsonl").stat().st_size:
             continue
-        req_path = report_due.REQUESTS_DIR / ("daily-%s.json" % d)
-        req = report_due.read_request(req_path)
-        if diary.exists() and req.get("status") == "done":
+        if day >= today:
+            if day == today:
+                today_note = f"today ({today}) is in progress; claim after day rollover"
             continue
-        if req.get("status") in {"pending", "claimed"}:
-            continue
-        # gap: sessions exist, no diary, no open request -> enqueue
-        report_due.ensure_request(
-            "daily", d,
-            [str(sessions), str(day_dir / "evidence.jsonl")],
-        )
-        enqueued.append(d)
-    # Today is still in progress: surface it, but never make it claimable.
-    tdir = DAILY_DIR / today.isoformat()
-    tsessions = tdir / "sessions.jsonl"
-    if tsessions.exists() and tsessions.stat().st_size > 0 and not (tdir / "diary.md").exists():
-        today_note = (
-            "today (%s) has sessions but no diary yet - normal; the claimable "
-            "request appears after day rollover" % today.isoformat()
-        )
+        req = report_due.read_request(report_due.request_path("daily", day))
+        diary = read_daily_text(HUB_HOME, day, "diary.md")
+        if req.get("status") == "done":
+            from report_contract import DRAFT_MARKERS, validate_report
+            try:
+                stale = report_due.completed_snapshot_error(req)
+                if stale:
+                    raise ValueError(stale)
+                if req.get("contract_version") in (2, 3):
+                    # v2/v3 reports were published under a checked contract;
+                    # revalidation keeps tamper detection. Unversioned
+                    # legacy/deterministic done reports only reopen on
+                    # missing/draft diaries — never on contract drift.
+                    validate_report(diary, "daily", day, HUB_HOME)
+                elif not diary.strip() or any(
+                        marker.lower() in diary.splitlines()[0].lower()
+                        for marker in DRAFT_MARKERS):
+                    raise ValueError("missing_or_draft_diary")
+                continue
+            except ValueError as exc:
+                reason = "completed report invalid or missing: " + str(exc)
+            result = report_due.reopen_request("daily", day, reason)
+            if result.get("ok"):
+                enqueued.append(day)
+        elif not req:
+            day_dir = DAILY_DIR / day
+            report_due.ensure_request("daily", day, [str(day_dir / "sessions.jsonl"), str(day_dir / "evidence.jsonl")])
+            enqueued.append(day)
     return enqueued, today_note
 
 
 def next_action(pending, watcher):
     today = datetime.now().date().isoformat()
-    claimable = [
-        r for r in pending
-        if not (r.get("kind") == "daily" and r.get("period") == today)
-    ]
+    claimable = [r for r in pending
+                 if ((r.get("status") == "pending") or
+                     (r.get("status") == "claimed" and not report_due.lease_active(r)))
+                 and (r.get("period", "") < (today if r.get("kind") == "daily" else today[:7]))
+                 and (r.get("kind") != "monthly" or not report_due.monthly_dependencies(r["period"]))]
     if claimable:
-        first = claimable[0]
-        return (
-            "claim report %s %s via report_due.py claim --kind %s --period %s, "
-            "then write %s/%s/%s/%s per SKILL.md diary contract"
-            % (first["kind"], first["period"], first["kind"], first["period"],
-               HUB_HOME,
-               "daily" if first["kind"] == "daily" else "monthly",
-               first["period"],
-               "diary.md" if first["kind"] == "daily" else (first["period"] + ".md"))
-        )
-    if pending and not claimable:
-        return "none - today's diary is still a draft; leave it for day rollover"
+        # Daily handoff is newest-first: yesterday before historical backfill.
+        dailies = [r for r in claimable if r.get("kind") == "daily"]
+        first = max(dailies or claimable, key=lambda r: r["period"])
+        if first["kind"] == "daily":
+            return (f"claim report daily {first['period']} via report_due.py claim "
+                    f"--kind daily --period {first['period']} --agent <agent> --model <model> --session <session>; "
+                    "keep returned claim_token; write ONLY the 「全天总结」 overview "
+                    "candidate (分层小标题 + [n] refs — no task details, stats, or JSON; "
+                    "the program assembles the rest), then report_due.py publish "
+                    "--kind daily with the same --agent --session --token and --input <overview-file>")
+        return (f"claim report monthly {first['period']} via report_due.py claim "
+                f"--kind monthly --period {first['period']} --agent <agent> --model <model> --session <session>; "
+                "keep returned claim_token; write the monthly candidate per SKILL.md, "
+                "then report_due.py publish with the same --agent --session --token and --input <candidate>")
+    if pending:
+        return "none - reports are actively leased, in-progress periods, or waiting for daily dependencies"
     if watcher["state"] != "alive":
         return "watcher unhealthy (%s) - run bootstrap.sh" % watcher["state"]
     return "none - memory is current"
+
+
+def historical_backlog(pending):
+    """Informational inventory only; never hide, delete, or defer requests."""
+    from cold_storage import iter_day_files
+    result = []
+    for req in pending:
+        day = req.get("period", "")
+        if req.get("kind") != "daily" or (DAILY_DIR / day / "sessions.jsonl").exists():
+            continue
+        if any(item.get("name") == "sessions.jsonl" and item.get("source") == "cold"
+               for item in iter_day_files(HUB_HOME, day)):
+            result.append(day)
+    return sorted(result)
 
 
 def gather():
@@ -140,6 +178,7 @@ def gather():
         "enqueued_gaps": enqueued,
         "today_note": today_note,
         "pending_reports": pending,
+        "historical_cold_backlog": historical_backlog(pending),
         "manifest": str(MANIFEST_PATH),
         "next_action": next_action(pending, watcher),
     }
@@ -170,7 +209,11 @@ def main():
         for r in data["pending_reports"]:
             who = " by " + r["claimed_by"] if r.get("claimed_by") else ""
             print("  - %s %s [%s]%s" % (r["kind"], r["period"], r["status"], who))
+    if data.get("historical_cold_backlog"):
+        days = data["historical_cold_backlog"]
+        print(f"historical cold backlog: {len(days)} requests ({days[0]} → {days[-1]}); preserved pending, newest daily handoff takes priority")
     print("next: %s" % data["next_action"])
+    print('retrieval gate: references like 刚才写的/那个方案/另一个会话 → hub search "<user words>" --cwd "$PWD" --budget 800 FIRST; then read artifact. Startup manifest is not a per-turn search.')
     if data.get("today_note"):
         print("note: %s" % data["today_note"])
     print("")

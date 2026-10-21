@@ -1,6 +1,6 @@
 ---
 name: hubmemory
-description: 本机跨 agent 共享记忆中枢。监控并汇总 Claude Code / Codex CLI / Codex Desktop 的所有会话，统一存入 ~/hubmemory。当用户询问"最近/今天/昨天/这几天在干什么"、"上次做了什么"、"另一个 agent 在做什么"、"之前提到过 xxx 吗"时必须使用。新会话开始时主动 bootstrap，让自己感知其他 agent 的当前状态。
+description: 本机跨 agent 共享记忆中枢，采集 DSH / Claude Code / Codex 会话。当用户引用“刚才写的文档/那个方案/上次改的功能/另一个会话的结果”，或问最近工作、历史决定、其他 agent 状态时，必须先用 hubmemory 定位来源和交付物，再读文件；不得先用 Git/本地搜索发现文件后再补查记忆。新会话运行 session_start.py。
 ---
 
 # hubmemory — 本机多 agent 共享记忆中枢
@@ -8,11 +8,10 @@ description: 本机跨 agent 共享记忆中枢。监控并汇总 Claude Code / 
 ## 接入规则（每次新会话必须执行，全部幂等）
 
 ```bash
-# 第一步：确认 watcher 在运行（已在跑则秒退，不会重复启动）
-bash ~/.claude/skills/hubmemory/scripts/bootstrap.sh
-
-# 第二步：感知当前状态 + 遵守用户约束（status.py 输出已含约束摘要）
-python3 ~/.claude/skills/hubmemory/scripts/status.py
+# 统一入口：健康检查、缺失报告、刷新 L0 索引
+python3 ~/.claude/skills/hubmemory/scripts/session_start.py
+# 仅当 watcher unhealthy 时，再执行 bootstrap.sh；无需每次安装/重启
+# 用户约束必须读取：~/hubmemory/profile/constraints.md
 ```
 
 如果你的工具不支持 Bash，用文件读取工具直接读 `~/hubmemory/profile/constraints.md` 和 `~/hubmemory/live/index.json`。
@@ -29,21 +28,39 @@ python3 ~/.claude/skills/hubmemory/scripts/report_due.py list --json
 
 ```bash
 python3 ~/.claude/skills/hubmemory/scripts/report_due.py claim \
-  --kind daily --period YYYY-MM-DD --agent <当前agent> --model <当前模型>
+  --kind daily --period YYYY-MM-DD --agent <当前agent> --model <当前模型> \
+  --session <当前完整会话ID>
 ```
 
-读取任务的 `source` 文件，用你当前正在使用的模型总结实际工作，直接写入对应的 `diary.md` 或 `monthly/YYYY-MM.md`。总结完成后标记：
+领取后用 `python3 scripts/daily_input.py --date YYYY-MM-DD` 读取与发布编号一致的证据包（只读、无模型调用）。保存返回的 `claim_token`。日报只让当前模型生成 `## 全天总结` 的独立候选，不要重写整篇日报或生成统计/任务 JSON。先读取程序生成的有界证据包及引用编号，候选正文只用 `[n]` 引用；路径、session/event 定位由程序列在总结末尾。月报沿用其独立契约。不要直接覆盖正式 diary。然后校验并原子发布：
 
 ```bash
-python3 ~/.claude/skills/hubmemory/scripts/report_due.py complete \
-  --kind daily --period YYYY-MM-DD --agent <当前agent> --model <当前模型>
+python3 ~/.claude/skills/hubmemory/scripts/report_due.py publish \
+  --kind daily --period YYYY-MM-DD --agent <当前agent> --model <当前模型> \
+  --session <当前完整会话ID> --token <claim_token> --input <候选Markdown文件>
 ```
+
+租约默认 6 小时；另一个 agent/session 不得抢有效租约。`complete` 兼容入口同样要求 session/token 和完整契约校验，不能靠改标题把草稿变终稿。月报仅在所属日报完成后可领取。
 
 不要把模型私有思考写入报告；报告只记录有证据的目标、实际动作、结果、状态和下一步。一个 agent 已领取的任务不要重复处理。
 
-日报脚本会先生成一个无模型依赖的确定性基线并自动标记为 `done`，保证不会留下无人处理的低质量 pending 草稿。若当前 agent 有足够上下文进行更高质量语义整理，应先执行 `report_due.py reopen`，再领取、重写并完成；完成记录中的 `completion_kind` 会区分 `deterministic` 和 `semantic`。
+**AI 只介入日报的「全天总结」，其他内容均由程序生成。** 定时脚本产出规则草稿并保留 pending；次日第一个 agent 自动 claim，只输出总结候选，经 publish 校验后由程序装配正式日报。配置启用 llm 时也只调用模型生成此段，不另行调用 AI 提取 profile、写统计或任务明细。未出现新 agent 时保留待办，不用规则占位冒充 AI 总结。
 
-日报必须先给出 `## 全天总结`，说明当天主要工作主线、已完成事项、未收束事项和全天结论；随后按 agent 和工作事项逐项写出目标、实际完成、关键证据、任务结论、当前状态（已完成/进行中/失败/阻塞）、下一步和来源 session。不要只罗列消息或工具调用。完成日报/月报后，如果证据显示某个结论对未来多个 session 仍然有效，再用 `remember.py add --json` 写入长期记忆。必须提供至少一个 `source_session_ids` 或 `source_event_ids`；一次性任务、猜测和未验证结论不要写入。
+总结必须有清晰层次：`## 全天总结` → `### 今天做了哪些事`、`### 主要结果`、`### 待办与阻塞`。每节使用简短条目，按工作主线归纳；没有待办则明确说明。不要堆细节路径、代码、命令或原始提示词；必要事实加 `[n]` 引用编号，参考来源由程序集中放在总结末尾。不要把来源声称的测试/部署当独立核验。TL;DR 从总结首个有效句/条目派生，不另调模型。标题、统计、会话/事项明细、状态、来源均由程序基于事实记录生成；无法确认状态就写未确认。
+
+新日报不再包含重复的 Agent-readable summary JSON，也不新增同内容旁车；保留原始 sessions.jsonl、程序证据 evidence.jsonl 和内部租约/归档校验 JSON。旧版日报继续兼容，月报契约单独保留。完成日报/月报后，仅当有证据证明结论对多个未来 session 有效，才用 remember.py 写长期记忆并附完整来源；一次性任务、猜测和未验证结论不要写入。
+
+### 每轮工具选择前的跨会话触发门（不只在启动时检查）
+
+以下表达即使看似“找文件/审阅代码”，也先视为跨会话引用：**刚才写的、刚生成的、那个方案、上次改的、接着做、另一个 agent/会话的结果**。
+
+1. **第一条与定位有关的工具调用必须是 hubmemory 检索**。不要先查 Git、本地 glob、工具自带历史记忆，再补查 hubmemory。启动 MANIFEST 不等于本轮已检索。
+2. 用用户原话调用下方命令，传当前 cwd。已知当前 session ID 时可加 `--exclude-session "$DSH_SESSION_ID"` 防止命中自己的问题回声；不要排除承接任务本身的来源会话。
+3. 读取命中的 `artifact` 实体文件，再做审阅；`ref#L行号` + 完整 session/event 是来源核验入口。`delivered` 只是来源声称已交付，不等于文件存在或工作已独立验收。
+4. `sufficiency: thin` 时不得宣称已找到。先看 live 对应快照，必要时做一次精简主题词查询；仍不确定就澄清，之后才允许本地文件搜索并说明降级。
+5. 含糊的“那个”且无主题词时不要全历史瞎猜，读 live 或询问对象。纯代码任务不反复检索。
+
+这是 Agent 接入协议，不是运行时强制拦截器；不能承诺任意模型 100% 遵守。验收应分别测“是否先调用”和“调用后能否命中”。
 
 ### 当前任务相关记忆
 
@@ -51,7 +68,7 @@ python3 ~/.claude/skills/hubmemory/scripts/report_due.py complete \
 
 ```bash
 python3 ~/.claude/skills/hubmemory/scripts/context.py "<用户当前任务>" \
-  --cwd "$PWD" --limit 8
+  --cwd "$PWD" --limit 8 --budget 800
 ```
 
 该命令综合检索长期记忆、结构化 evidence、日报/月报和原始 session 事件，并优先当前项目。没有命中时继续正常工作，不要为了检索反复扩大上下文。
@@ -152,11 +169,11 @@ python3 ~/.claude/skills/hubmemory/scripts/query.py <关键词> --days 7
 ├── daily/YYYY-MM-DD/
 │   ├── sessions.jsonl     # 当天完整会话事件流
 │   ├── evidence.jsonl      # 从事实事件派生的结构化工作证据，可重建
-│   ├── diary.md           # 当天工作日记（凌晨 3:07 自动生成）
-│   └── contrib.json       # 各 agent token 贡献比例
+│   └── diary.md           # 当天工作日记（凌晨 3:07 产出规则草稿，次日首个 agent 语义改写后才算完成）
 ├── memory/
 │   └── memories.jsonl      # AI 确认后的长期记忆，必须带来源和状态
-└── monthly/YYYY-MM.md     # 月度总结（月末自动生成）
+├── monthly/YYYY-MM.md     # 月度总结（月末自动生成）
+└── archive/YYYY/YYYY-MM.tar.gz + .index.json  # 已退出 7 天窗口的旧月无损归档（daily/ 只保留当前月+短缓冲）
 ```
 
 ---
@@ -187,6 +204,10 @@ watcher 管理：
 
 `live` 不是历史归档：当天会话全部保留；跨日 stale 会话超过 `retention.live_after_idle_hours`、确认已进入 `daily` 且没有未完成任务声明后，会自动从实时索引和 Markdown 快照中清理。清理不影响事实事件、报告、长期记忆或采集偏移；旧 session 再次产生事件时会自动回到 `live`。
 
+**月度归档**：`daily/` 保留当前月及安全缓冲；已过月按月末算退出近 7 天窗口后，且日报/月报依赖均已收束，才允许自动归档到 `archive/YYYY/YYYY-MM.tar.gz`。归档、watcher 写入、报告发布共用存储锁；压缩包临时生成，经文件路径/字节哈希校验后原子发布，再删除已核验源目录。缺日报会创建待总结请求，不当作已完成。恢复 `hub archive extract YYYY-MM` 前完整预检，拒绝覆盖已有日期、路径穿越和软链越界。恢复/迟到历史事件支持安全合并再归档，冲突必须保留源而非静默丢弃。
+
+**冷记忆不消失**：检索、`hub day` 和月报可直接流式读取归档成员，不必恢复整月、不产生永久未压缩副本。冷引用格式为 `archive/YYYY/YYYY-MM.tar.gz!YYYY-MM/YYYY-MM-DD/sessions.jsonl#L<n>`；先用 `.index.json` 筛日期，命中才解压，发现校验不符则拒绝读取并报告。旧版无索引归档标记 unverified，不冒充已验证。
+
 多 Agent 共用时只维护一份源码，并运行 `scripts/install_skill_links.sh` 为 Claude、Codex 创建整目录软链接。安装器会备份冲突目标且可重复执行；`bootstrap.sh` 会从自身脚本位置识别真实 Skill 目录，不要求源码必须位于 `~/.claude/skills`。
 
 ---
@@ -197,12 +218,12 @@ watcher 管理：
 
 **Agent 标签**：`claude` / `codex-desktop` / `codex-vscode` / `codex`（纯 CLI）
 
-**贡献比例**：`tokens_out(agent) / Σ tokens_out(同 cwd + 同天所有 agent)`
+**贡献统计**：`tokens_out` 仅在使用时内存计算（不再落盘 contrib.json；当前 dsh 源基本为 0，不要把它当成本依据）。
 
-**日报生成**（零模型依赖）：
-- 定时脚本只负责生成结构化草稿并创建待处理任务，不绑定任何固定模型。
-- 下一次用户主动使用的 agent 会自动领取 pending 日报/月报，用当前 agent 的模型完成语义汇总。
-- 没有新的 agent 会话时，任务保留在队列中，不丢数据；本地 Qwen 不是运行依赖。
+**日报生成**（定时草稿 + 首个 agent 语义完成）：
+- 定时脚本产出规则草稿（标题带"规则草稿"）并留 pending 任务，草稿不算终稿。
+- 下一个开启会话的 agent 自动 claim pending 日报，只生成分层全天总结候选，再 publish 由程序装配；月报按独立契约处理。
+- 没有新的 agent 会话时，任务保留在队列中不丢数据；本地 Qwen 不是运行依赖。
 
 **记忆检索与长期记忆**：
 - `sessions.jsonl` 是唯一事实源；`evidence.jsonl`、日报和长期记忆都是可重建派生物。
@@ -221,7 +242,7 @@ watcher 管理：
 | 层 | 位置 | 规模 | 何时读 |
 |---|---|---|---|
 | L0 索引 | `~/hubmemory/MANIFEST.md` | ~400 tok | **每个新会话先读**：live 会话、pending 报告、近 7 天一行索引、open loops、长期记忆标题 |
-| L1 摘要 | `daily/<date>/diary.md` 的 `> TL;DR` 行 + `## Agent-readable summary` JSON 块 | ~200 tok/篇 | MANIFEST 命中某天，或问"某天干了什么" |
+| L1 摘要 | 日报的 TL;DR + 分层全天总结；来源按编号点开 | 有界摘要 | MANIFEST 命中某天，或问"某天干了什么"；不重复读 JSON/明细 |
 | L2 证据 | `evidence.jsonl`、`sessions.jsonl`、diary 正文 | 全量 | 只在 L0/L1 不足以回答时按 `ref` 指针点开 |
 
 ### 入口
@@ -246,16 +267,19 @@ watcher 管理：
 
 ### 检索
 
-- `context.py "<query>" --budget 800`：只回结论行 + `ref` 指针，按 token 预算截断；输出含 `sufficiency`（sufficient/thin）告诉你是否够用。
+- `context.py "<用户原话>" --cwd "$PWD" --budget 800`：近期意图/主题检索，返回结论、精确 ref 行号、完整 session/event、来源时间和 artifact 路径；人读/JSON 均按估算 token 预算限制，超预算丢弃整条而非截坏指针。`sufficiency` 是主题证据充分度，不是事实正确率；raw score 不是 confidence。
+- `--as-of <ISO时间>`：排他历史截止点，防止后续提问/复盘污染盲测；`--exclude-session <完整ID>`：排除当前会话自回声。已交付状态仅代表来源声称，需要读取实体文件。
+- 优化设计和验收：`references/optimization-plan.md`；隔离回归：`python3 scripts/test_retrieval.py`。
 - `query.py`：旧接口，返回完整记录，适合人工排查。
 - 问"最近/昨天干了什么"先看 MANIFEST，别先跑全文检索。
 
 ### diary 契约（生成方必须遵守）
 
-1. 文件第二行必须是 `> **TL;DR**: …` 一行摘要（任务数、完成/进行中/阻塞计数、主线）。
-2. 末尾必须有 `## Agent-readable summary` 节，内含一个 ```json fenced code block：每项任务的 goal/status/conclusion/session/confidence + `open_loops`。
-3. 每个工作事项保留：工作目标 / 实际动作 / 关键证据 / 任务结论 / 当前状态 / 下一步 / 来源 session。
-4. 证据不足写"证据不足/无法确认"，禁止编造结论；`confidence: low`。
+1. 日报 v3 的 AI 输入是程序生成的有界证据包；输出仅 `## 全天总结` 及三个规定子节，不输出标题、TL;DR、任务明细、JSON 或来源路径。
+2. 总结按主线写简洁条目，事实用 `[n]` 引用编号；程序验证编号并在总结末尾列出完整来源。引用中的 session/event/ref 不让模型编造。
+3. 程序从总结首个有效句提取第二行 `> **TL;DR**: …`，生成统计和客观明细；状态必须注明来源声称或未确认，不由模型补猜。
+4. 新日报禁止重复 JSON；旧版 v2 日报读取兼容。索引从现有 evidence/session 数据派生，不额外复制一套事实。月报仍按独立 v2 契约发布。
+5. source fingerprint、租约、原子发布与完成后内容哈希校验仍适用，格式简化不降低并发/来源保护。
 
 ### 写入端密度约束
 

@@ -107,13 +107,37 @@ def _files(events: list[dict[str, Any]], texts: list[str]) -> list[str]:
     return sorted(found)[:80]
 
 
+NEGATED_COMPLETION_RE = re.compile(
+    r"(?:尚未|未曾|没有|并未|不能|无法|未能|不曾|还没|没能|未|没|不)(?:全部|完全|全部都|能|够)?"
+    r"(?:完成|通过|成功|修复|验证|交付)|"
+    r"\b(?:not|never|hasn't|haven't|isn't|wasn't|cannot|can't|didn't)\s+"
+    r"(?:yet\s+)?(?:been\s+)?(?:complete[ds]?|pass(?:ed)?|succeed(?:ed)?|fix(?:ed)?|verified|delivered)\b",
+    re.I,
+)
+
+
 def _status(texts: list[str]) -> str:
-    joined = " ".join(texts).lower()
-    if any(word.lower() in joined for word in STATUS_WORDS["blocked"]):
-        if not any(word.lower() in joined for word in STATUS_WORDS["completed"]):
-            return "blocked"
-    if any(word.lower() in joined for word in STATUS_WORDS["completed"]):
-        return "completed"
+    """Latest explicit *source claim*, not verified completion.
+
+    Scan in reverse chronological clause order so a late failed regression
+    overrides an earlier success. Negation is checked before positive words.
+    A session can contain multiple tasks; this conservative candidate is not a
+    substitute for the agent's evidence-backed per-task semantic judgement.
+    """
+    for text in reversed(texts):
+        for clause in reversed(re.split(r"[。！？!?\n；;]", text.lower())):
+            if NEGATED_COMPLETION_RE.search(clause):
+                return "blocked" if re.search(r"失败|无法|阻塞|未通过|未能|不能|fail|block|cannot", clause) else "in_progress"
+            if re.search(r"阻塞|无法|失败|报错|未能|超时|\b(?:blocked|failed|failure|timeout)\b", clause):
+                return "blocked"
+            # Future intent and conditional completion are not a delivery.
+            if re.search(r"计划|准备|将会|将要|待完成|待验证|如果|\b(?:plan|planned|will|would|if|todo)\b", clause):
+                if any(word in clause for word in STATUS_WORDS["completed"]):
+                    return "in_progress"
+            if any(word in clause for word in STATUS_WORDS["completed"]) or re.search(r"\b(?:completed|passed|verified|delivered|fixed)\b", clause):
+                return "completed"
+            if any(word in clause for word in STATUS_WORDS["in_progress"]):
+                return "in_progress"
     return "in_progress"
 
 
@@ -146,7 +170,12 @@ def build_evidence(events: list[dict[str, Any]], period: str | None = None) -> l
         agent = str(session_events[0].get("agent") or "unknown")
         model = str(session_events[0].get("model") or "unknown")
         cwd = str(session_events[0].get("cwd") or "")
-        status = _status(all_texts)
+        # User requests are not completion evidence. Sort source claims by
+        # timestamp before status inference; collection order may be backfilled.
+        ordered_claims = [clip(useful_text(event.get("text") or ""), 700)
+                          for event in sorted(session_events, key=lambda e: str(e.get("ts") or ""))
+                          if event.get("role") == "assistant" and useful_text(event.get("text") or "")]
+        status = _status(ordered_claims)
         all_results = [
             text for text in assistant_texts
             if any(word.lower() in text.lower() for words in STATUS_WORDS.values() for word in words)
@@ -177,6 +206,8 @@ def build_evidence(events: list[dict[str, Any]], period: str | None = None) -> l
                 "results": results,
                 "next_steps": next_steps,
                 "status": status,
+                "status_basis": "latest_source_claim_unverified",
+                "semantic_verified": False,
                 "tools": _tool_names(session_events),
                 "files": _files(session_events, all_texts),
                 "source_event_ids": source_ids,

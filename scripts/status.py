@@ -126,6 +126,13 @@ def format_active_tasks() -> str:
     return "\n".join(lines)
 
 
+def _constraint_key(line: str) -> str:
+    """Normalized key ignoring ts/meta wrappers and punctuation so display
+    never shows near-identical constraint lines."""
+    from profile_store import profile_key, entry_text
+    return profile_key(entry_text(line))
+
+
 def format_recent_constraints(limit: int = 5) -> str:
     if not CONSTRAINTS_PATH.exists():
         return "  (no constraints recorded yet)"
@@ -133,7 +140,11 @@ def format_recent_constraints(limit: int = 5) -> str:
     lines = [ln for ln in lines if ln.strip().startswith("- ")]
     if not lines:
         return "  (no constraints recorded yet)"
-    return "\n".join(f"  {ln}" for ln in lines[-limit:])
+    from profile_store import unique_lines, entry_text
+    unique = unique_lines(lines)
+    # Full provenance stays on disk; startup display spends tokens on rules,
+    # not repeated hashes/session wrappers. Most recently stated rules win.
+    return "\n".join(f"  - {entry_text(ln)}" for ln in unique[-limit:])
 
 
 def format_pending_reports() -> str:

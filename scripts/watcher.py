@@ -40,6 +40,12 @@ except ImportError:
     print("ERROR: watchdog not installed. Run: pip install --user watchdog", file=sys.stderr)
     sys.exit(1)
 
+# Storage-lock protocol: DailyWriter takes a SHARED per-month lock around every
+# daily/ write so archive.py (EXCLUSIVE holder) can never pack/delete a day dir
+# mid-append.  Mandatory: a watcher without the protocol must not run — it
+# could write into a dir mid-delete and lose events.
+import storage_lock  # noqa: E402
+
 
 HUB_HOME = Path(os.environ.get("HUBMEMORY_HOME", os.path.expanduser("~/hubmemory")))
 CONFIG_PATH = HUB_HOME / "config.yaml"
@@ -454,13 +460,20 @@ def _clean_intent_text(raw: str) -> str:
 class DailyWriter:
     """按日期分文件的会话事件 append。"""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, hub_home: Path | None = None):
         self.root = root
+        self.hub_home = hub_home or root.parent   # daily/ -> hub root
         self.lock = threading.Lock()
         self.handles: dict[str, Any] = {}
         self.seen_event_ids: dict[str, set[str]] = {}
         self._rebuild_pending: set[str] = set()
         self._rebuild_lock = threading.Lock()
+
+    def _write_guard(self, day: str):
+        """SHARED per-month lock around any mutation under daily/<day>/.
+        archive.py takes the same lock EXCLUSIVELY while packing + deleting
+        that month, so an append can never race an archive delete."""
+        return storage_lock.month_lock(self.hub_home, day[:7], shared=True)
 
     def _load_seen_event_ids(self, d: str, target: Path) -> set[str]:
         seen = self.seen_event_ids.get(d)
@@ -490,19 +503,20 @@ class DailyWriter:
         dt = parse_iso(event["ts"]) or local_now()
         d = date_str(dt)
         target_dir = self.root / d
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "sessions.jsonl"
-        with self.lock:
-            seen = self._load_seen_event_ids(d, target)
-            event_id = event.get("event_id")
-            if event_id and event_id in seen:
-                return False
-            with target.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(event, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            if event_id:
-                seen.add(event_id)
+        with self._write_guard(d):
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / "sessions.jsonl"
+            with self.lock:
+                seen = self._load_seen_event_ids(d, target)
+                event_id = event.get("event_id")
+                if event_id and event_id in seen:
+                    return False
+                with target.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                if event_id:
+                    seen.add(event_id)
         with self._rebuild_lock:
             self._rebuild_pending.add(d)
         return True
@@ -518,6 +532,12 @@ class DailyWriter:
                 logger.warning("rebuild_conversations failed for %s: %s", d, exc)
 
     def _rebuild_conversations(self, d: str) -> None:
+        # SHARED month lock: archive may not delete the day mid-rebuild,
+        # and we never recreate a just-archived dir.
+        with self._write_guard(d):
+            self._rebuild_conversations_inner(d)
+
+    def _rebuild_conversations_inner(self, d: str) -> None:
         sessions_path = self.root / d / "sessions.jsonl"
         if not sessions_path.exists():
             return
@@ -1190,6 +1210,9 @@ class SessionProcessor:
                 logger.warning("read failed %s: %s", file_path, exc)
 
 
+STORAGE_LOCK_PROTOCOL = 1   # bumped when DailyWriter's lock protocol changes
+
+
 class HealthState:
     """Atomic watcher heartbeat and reconciliation telemetry."""
 
@@ -1206,6 +1229,7 @@ class HealthState:
                 "pid": os.getpid(),
                 "started_at": self.started_at,
                 "heartbeat_at": local_now().isoformat(),
+                "storage_lock_version": STORAGE_LOCK_PROTOCOL,
             })
             tmp = self.path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1390,7 +1414,7 @@ def main() -> int:
     except (TypeError, ValueError):
         live_retention_hours = 24
     live = LiveIndex(INDEX_PATH, retention_hours=live_retention_hours)
-    daily = DailyWriter(DAILY_DIR)
+    daily = DailyWriter(DAILY_DIR, hub_home=HUB_HOME)
     processor = SessionProcessor(offsets, live, daily, config)
     health = HealthState(HEALTH_PATH)
     watcher_config = config.get("watcher") or {}

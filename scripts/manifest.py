@@ -2,8 +2,10 @@
 """hubmemory manifest — build ~/hubmemory/MANIFEST.md, the L0 index.
 
 Hardening rules:
-  1. Prefer the diary's '## Agent-readable summary' JSON block over regexing
-     prose; prose labels are fallback only (survives language/label drift).
+  1. Task counts/statuses come from evidence.jsonl records, whose
+     status_basis is 'latest_source_claim_unverified' — they are source
+     claims, never rendered as verified. Diary content (v3 no-JSON first,
+     legacy v2 JSON block accepted, prose as last resort) is the fallback.
   2. Resolution decays with distance: yesterday gets goals, the last few days
      one line each, older days collapse into a monthly bucket line.
 """
@@ -16,6 +18,11 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
+try:
+    import cold_storage as _cold
+except ImportError:  # cold archive reader absent: manifest stays hot-only
+    _cold = None
+
 HUB_HOME = Path(os.environ.get("HUBMEMORY_HOME", os.path.expanduser("~/hubmemory")))
 LIVE_INDEX = HUB_HOME / "live" / "index.json"
 TASKS_PATH = HUB_HOME / "live" / "tasks.json"
@@ -26,10 +33,20 @@ MEMORY_PATH = HUB_HOME / "memory" / "memories.jsonl"
 MANIFEST_PATH = HUB_HOME / "MANIFEST.md"
 
 JSON_BLOCK_RE = re.compile(r"## Agent-readable summary.*?`{3}json\s*(.*)\n?`{3}\s*$", re.S)
-GOAL_LINE_RE = re.compile(r"^- 工作目标：(.+)$", re.M)
-STATUS_LINE_RE = re.compile(r"^- 当前状态：(.+)$", re.M)
-TASK_BLOCK_RE = re.compile(r"### 工作事项.*?(?=### |## |$)", re.S)
-CONCLUSION_LINE_RE = re.compile(r"^- 任务结论：(.+)$", re.M)
+TLDR_RE = re.compile(r"^>\s*\*\*TL;DR\*\*\s*[:：]\s*(.+)$", re.M)
+OVERVIEW_RE = re.compile(r"^## 全天总结\s*\n(.*?)(?=^## |\Z)", re.M | re.S)
+GOAL_LINE_RE = re.compile(r"^-?\s*\*{0,2}工作目标\*{0,2}\s*[:：]\s*(.+)$", re.M)
+STATUS_LINE_RE = re.compile(r"^-?\s*\*{0,2}当前状态\*{0,2}\s*[:：]\s*(.+)$", re.M)
+TASK_BLOCK_RE = re.compile(r"^### .*?(?=^### |^## |\Z)", re.S | re.M)
+CONCLUSION_LINE_RE = re.compile(r"^-?\s*\*{0,2}任务结论\*{0,2}\s*[:：]\s*(.+)$", re.M)
+NEXT_LINE_RE = re.compile(r"^-?\s*\*{0,2}下一步\*{0,2}\s*[:：]\s*(.+)$", re.M)
+# v3 assembled report: "## 数据统计（程序生成）" carries
+# "- 事件数：N；会话数：N；工作事项：N" and
+# "- 状态分布（来源声称，未经独立验证）：已完成 x 项；进行中 y 项…"
+STATS_COUNT_RE = re.compile(r"工作事项\s*[:：]\s*(\d+)")
+STATS_DIST_RE = re.compile(
+    r"状态分布[^：:]*[:：]\s*(.+)$", re.M)
+STATS_PAIR_RE = re.compile(r"(已完成|完成|进行中|阻塞|失败)\s*(\d+)\s*项")
 
 STATUS_ICON = {
     "completed": "done", "done": "done",
@@ -37,7 +54,8 @@ STATUS_ICON = {
     "blocked": "blocked",
     "failed": "fail",
 }
-CN_STATUS = {"已完成": "done", "进行中": "wip", "阻塞": "blocked", "失败": "fail"}
+CN_STATUS = {"已完成": "done", "完成": "done", "进行中": "wip",
+             "阻塞": "blocked", "失败": "fail"}
 
 
 def read_json(path, default):
@@ -54,7 +72,21 @@ def clip(text, limit=120):
 
 def norm_status(raw):
     s = str(raw or "?").strip()
+    # Drop qualifiers like "完成（来源声称）" before mapping.
+    s = re.sub(r"[（(].*?[)）]", "", s).strip()
     return STATUS_ICON.get(s, CN_STATUS.get(s, "?"))
+
+
+def diary_tldr(text):
+    """Second-line `> **TL;DR**:` of any diary format; '' when absent."""
+    m = TLDR_RE.search(text or "")
+    return clip(m.group(1), 200) if m else ""
+
+
+def diary_overview(text):
+    """Body of `## 全天总结` — the only AI-authored section in v3 diaries."""
+    m = OVERVIEW_RE.search(text or "")
+    return m.group(1).strip() if m else ""
 
 
 def _diary_from_json_block(text):
@@ -69,7 +101,8 @@ def _diary_from_json_block(text):
 
 def parse_diary(text):
     """Return {tasks, statuses, goals, conclusions, open_loops}.
-    JSON block wins; prose regex is the fallback."""
+    Legacy v2 '## Agent-readable summary' JSON block wins when present;
+    v3 diaries embed no JSON and take the deterministic-prose path."""
     js = _diary_from_json_block(text)
     if js and isinstance(js.get("tasks"), list):
         statuses, goals, conclusions = {}, [], []
@@ -83,20 +116,80 @@ def parse_diary(text):
         return {"tasks": len(js["tasks"]), "statuses": statuses,
                 "goals": goals, "conclusions": conclusions,
                 "open_loops": js.get("open_loops") or []}
-    statuses, goals, conclusions = {}, [], []
+    statuses, goals, conclusions, loops = {}, [], [], []
     for m in TASK_BLOCK_RE.finditer(text):
         block = m.group(0)
         g = GOAL_LINE_RE.search(block)
         s = STATUS_LINE_RE.search(block)
         c = CONCLUSION_LINE_RE.search(block)
+        nxt = NEXT_LINE_RE.search(block)
+        if not (g or s or c or nxt):
+            continue  # header-only ### (e.g. 会话一览) is not a task
         if g:
             goals.append(clip(g.group(1).split("；")[0], 80))
         if c:
             conclusions.append(clip(c.group(1), 160))
+        if nxt:
+            loops.append(clip(nxt.group(1).split("；")[0], 80))
         st = norm_status(s.group(1) if s else "?")
         statuses[st] = statuses.get(st, 0) + 1
+    if not statuses:
+        # v3 assembled report has no task JSON; its program-generated
+        # 数据统计 block still carries trustworthy counts.
+        dist = STATS_DIST_RE.search(text)
+        if dist:
+            for label, count in STATS_PAIR_RE.findall(dist.group(1)):
+                statuses[norm_status(label)] = int(count)
+        count = STATS_COUNT_RE.search(text)
+        if count:
+            missing = int(count.group(1)) - sum(statuses.values())
+            if missing > 0:
+                statuses.setdefault("?", missing)
     return {"tasks": sum(statuses.values()), "statuses": statuses,
-            "goals": goals, "conclusions": conclusions, "open_loops": []}
+            "goals": goals, "conclusions": conclusions,
+            "open_loops": loops}
+
+
+def day_evidence(day):
+    """evidence.jsonl records for a day (hot file or streamed cold bytes).
+
+    Records carry status_basis='latest_source_claim_unverified'; callers must
+    surface them as source claims, not verified facts."""
+    path = DAILY_DIR / day / "evidence.jsonl"
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="replace")
+    elif _cold is not None:
+        text = _cold.read_day_text(HUB_HOME, day, "evidence.jsonl") or ""
+    else:
+        return []
+    rows = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            rows.append(rec)
+    return rows
+
+
+def evidence_summary(records):
+    """{tasks,statuses,goals,conclusions,open_loops} from evidence records."""
+    statuses, goals, conclusions, loops = {}, [], [], []
+    for rec in records:
+        st = norm_status(rec.get("status"))
+        statuses[st] = statuses.get(st, 0) + 1
+        g = (rec.get("goals") or [""])[0]
+        if g:
+            goals.append(clip(g, 80))
+        r = (rec.get("results") or [""])[0]
+        if r:
+            conclusions.append(clip(r, 160))
+        for step in (rec.get("next_steps") or [])[:2]:
+            loops.append(clip(step, 80))
+    return {"tasks": len(records), "statuses": statuses,
+            "goals": goals, "conclusions": conclusions,
+            "open_loops": loops}
 
 
 INTENT_LINE_RE = re.compile(r"^- intent:\s*(.+)$", re.M)
@@ -147,6 +240,30 @@ def pending_reports():
     return out
 
 
+def _day_row(d, age, text, cold):
+    """One manifest row: evidence.jsonl first, diary content as fallback.
+
+    Stats from evidence or diary prose are *source claims* — the rendered
+    line carries a （来源声称） marker; only a legacy v2 JSON block is
+    treated as a self-describing report and left unflagged."""
+    ev = day_evidence(d)
+    if ev:
+        parsed = evidence_summary(ev)
+        claims = True
+    else:
+        parsed = parse_diary(text or "")
+        claims = parsed["tasks"] > 0 and _diary_from_json_block(text or "") is None
+    row = {"date": d, "age": age, "state": "ok", "cold": cold,
+           "tasks": parsed["tasks"], "statuses": parsed["statuses"],
+           "goals": parsed["goals"], "conclusions": parsed["conclusions"],
+           "open_loops": parsed["open_loops"], "claims": claims}
+    if cold:
+        row["ref"] = "archive/%s/%s.tar.gz!%s/%s/diary.md" % (d[:4], d[:7], d[:7], d)
+    else:
+        row["ref"] = "daily/%s/diary.md" % d
+    return row
+
+
 def day_summaries(days=7):
     today = datetime.now().date()
     rows = []
@@ -156,17 +273,49 @@ def day_summaries(days=7):
         diary = DAILY_DIR / d / "diary.md"
         sessions = DAILY_DIR / d / "sessions.jsonl"
         if not diary.exists() and not sessions.exists():
+            # Cold fallback: an archived day inside the window. Reads stream
+            # out of the month tarball; nothing is written to disk.
+            if _cold is None:
+                continue
+            text = _cold.read_day_text(HUB_HOME, d, "diary.md")
+            has_sessions = _cold.has_day(HUB_HOME, d)
+            ev = day_evidence(d)
+            if text is None and not has_sessions and not ev:
+                continue
+            if text is None and not ev:
+                rows.append({"date": d, "age": i, "state": "no_diary",
+                             "cold": True})
+                continue
+            rows.append(_day_row(d, i, text or "", True))
             continue
         if not diary.exists():
-            rows.append({"date": d, "age": i, "state": "no_diary"})
+            ev = day_evidence(d)
+            if ev:
+                rows.append(_day_row(d, i, "", False))
+            else:
+                rows.append({"date": d, "age": i, "state": "no_diary"})
             continue
-        parsed = parse_diary(diary.read_text(encoding="utf-8", errors="replace"))
-        rows.append({"date": d, "age": i, "state": "ok",
-                     "tasks": parsed["tasks"], "statuses": parsed["statuses"],
-                     "goals": parsed["goals"], "conclusions": parsed["conclusions"],
-                     "open_loops": parsed["open_loops"],
-                     "ref": "daily/" + d + "/diary.md"})
+        rows.append(_day_row(d, i,
+                             diary.read_text(encoding="utf-8", errors="replace"),
+                             False))
     return rows
+
+
+def archived_months(limit=12):
+    """One line per month archive for the manifest — metadata-only
+    (verify=False): index.json + already-cached checks, never opens or
+    hashes a gzip stream.  Corrupt/unverifiable archives are flagged."""
+    if _cold is None:
+        return []
+    out = []
+    for a in _cold.archives(HUB_HOME, verify=False)[:limit]:
+        flag = {"ok": "", "unverified": " (unverified)",
+                "not_checked": "", "no_index": " (no index)",
+                "corrupt": " (CORRUPT — quarantined)"}.get(a["status"], " ?")
+        out.append({"month": a["month"], "days": a["day_count"],
+                    "status": a["status"], "flag": flag,
+                    "ref": "archive/%s/%s.tar.gz" % (a["month"][:4], a["month"])})
+    return out
 
 
 def open_loops(limit=8):
@@ -203,18 +352,20 @@ def memory_index(limit=10):
 def _fmt_day(day):
     """Render a day line with resolution decaying by age."""
     if day["state"] == "no_diary":
-        return "- %s — sessions exist, diary not generated" % day["date"]
+        tag = " (archived)" if day.get("cold") else ""
+        return "- %s — sessions exist, diary not generated%s" % (day["date"], tag)
     statuses = ", ".join("%s:%s" % (k, v) for k, v in day["statuses"].items())
+    claim = "（来源声称）" if day.get("claims") else ""
     ref = "  ref:%s" % day["ref"]
     age = day.get("age", 0)
     if age <= 1:
         goals = "; ".join(day["goals"][:3])
         concl = ("  concl: " + day["conclusions"][0]) if day["conclusions"] else ""
-        return "- %s — %s项(%s) %s%s%s" % (day["date"], day["tasks"], statuses, goals, concl, ref)
+        return "- %s — %s项%s(%s) %s%s%s" % (day["date"], day["tasks"], claim, statuses, goals, concl, ref)
     if age <= 4:
         goals = "; ".join(day["goals"][:2])
-        return "- %s — %s项(%s) %s%s" % (day["date"], day["tasks"], statuses, goals, ref)
-    return "- %s — %s项%s" % (day["date"], day["tasks"], ref)
+        return "- %s — %s项%s(%s) %s%s" % (day["date"], day["tasks"], claim, statuses, goals, ref)
+    return "- %s — %s项%s%s" % (day["date"], day["tasks"], claim, ref)
 
 
 def render(data):
@@ -254,6 +405,13 @@ def render(data):
     for day in data["days"]:
         lines.append(_fmt_day(day))
 
+    if data.get("archived_months"):
+        lines += ["", "## Archived months (cold storage; search transparently, "
+                  "extract only on demand)"]
+        for m in data["archived_months"]:
+            lines.append("- %s — %s days%s  ref:%s"
+                         % (m["month"], m["days"], m["flag"], m["ref"]))
+
     if data["open_loops"]:
         lines += ["", "## Open loops"]
         lines += ["- " + loop for loop in data["open_loops"]]
@@ -271,6 +429,7 @@ def build():
     return {"generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "live_sessions": live_sessions(), "pending_reports": pending_reports(),
             "open_loops": open_loops(), "days": day_summaries(7),
+            "archived_months": archived_months(),
             "memories": memory_index()}
 
 

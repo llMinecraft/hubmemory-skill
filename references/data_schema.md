@@ -26,48 +26,19 @@ user 和 tool 消息的 `tokens_out` 恒为 0。
 
 ---
 
-## 2. `daily/YYYY-MM-DD/contrib.json`
+## 2. 贡献统计（已停止落盘）
 
-按 session 分组的贡献表：
-
-```json
-{
-  "session_id_or_group_key": {
-    "cwd": "/path/to/project",
-    "agents": {
-      "claude:claude-opus-4-7": 12450,
-      "codex:gpt-5.4": 8200
-    },
-    "ratios": {
-      "claude:claude-opus-4-7": 0.60,
-      "codex:gpt-5.4": 0.40
-    },
-    "total_tokens": 20650
-  }
-}
-```
+不再生成 `contrib.json`。历史旧文件可保留在无损归档中，统计按需由 `sessions.jsonl` 计算。缺失的 token 使用量不能当作真实的零成本，也不能当作工作质量/贡献比例。
 
 ---
 
 ## 3. `daily/YYYY-MM-DD/diary.md`
 
-Markdown。结构建议：
+v3 日报：定时脚本生成客观明细及待总结占位，保留 pending 请求。次日首个 agent 持 session/token 租约，只生成 `## 全天总结` 候选，发布程序装配最终日报。AI 不生成统计、任务明细、来源表或 JSON，也不顺带提取 profile。
 
-```markdown
-# 2026-09-21 工作日记
+全天总结固定分为 `### 今天做了哪些事`、`### 主要结果`、`### 待办与阻塞`。按主线归纳，不塞路径、代码、命令和原始提示词；必要证据用 `[n]` 标记，程序在总结末尾列出参考来源。TL;DR 从总结首个有效句/条目提取，不另调模型。程序明细中的状态只是来源声称/规则候选，不代表独立验收；无法确定时明确未确认。
 
-## 主题 1：yuzu 项目文档库重构
-- claude 完成后端 documents router 的 llm normalization 接入 [claude 100%]
-- ...
-
-## 主题 2：跨 agent 记忆系统
-- codex 生成 skill 初稿骨架 [codex 45% / claude 55%]
-- ...
-
-## 统计
-- 总 token 输出：20,650
-- 涉及 agent：claude (60%), codex (40%)
-```
+新日报不再嵌入 `Agent-readable summary` JSON，也不新增同内容的 JSON 旁车；索引复用已有 evidence/session 数据。原始事件 JSONL、派生证据 JSONL、租约和归档校验 JSON 仍保留。旧版 v2 日报的 JSON 读取兼容，不为格式升级自动重开已完成日报。月报现有契约单独保留。
 
 ---
 
@@ -80,7 +51,7 @@ Markdown。结构建议：
 - [2026-09-21 15:10] 中文回复，技术术语保留英文（session: rollout-...）
 ```
 
-去重规则：对内容做 sha1，与已存在行比对，命中则跳过。
+去重由 `profile_store.py` 统一实现：Unicode NFKC、大小写、空白和句末标点规范化；保留最近措辞/时间，并合并完整来源元信息。写入持 `.profile.lock`，临时文件 fsync 后原子替换。不会模糊合并不同范围/否定规则；语义近义项由 AI 核对后显式整理。status 展示仅规则正文，避免哈希和重复来源占用上下文。
 
 ---
 
@@ -252,10 +223,10 @@ intent != last_user means the session pivoted mid-way. MANIFEST shows both side 
 
 ## N+1. daily/YYYY-MM-DD/diary.md (structure contract)
 
-1. Line 2: a one-line TL;DR.
-2. Trailing '## Agent-readable summary' section containing a fenced JSON block:
-   per-task goal/status/conclusion/agent/model/session/files/confidence plus open_loops.
-   manifest.py prefers this block; prose sections are fallback only.
+1. Line 2: one-line TL;DR extracted by code from the AI overview.
+2. Only the structured whole-day overview is AI-authored; deterministic reference list and factual session/statistics sections are assembled by code at publication.
+3. No embedded JSON in new daily reports. Indexes use existing evidence/session data; old JSON-bearing daily reports remain readable. Monthly v2 reports retain their separate contract.
+4. The request records contract_version=3, source fingerprint, output hash and the owning lease; no AI-generated capability, count or ref path is trusted.
 
 ## N+2. MANIFEST.md
 
