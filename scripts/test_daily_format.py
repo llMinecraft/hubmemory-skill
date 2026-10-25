@@ -17,6 +17,19 @@ DAY = "2020-05-06"
 
 
 class DailyFormatTest(unittest.TestCase):
+    def test_omit_duplicate_sessions_and_filter_internal_display(self):
+        item = {"session_id": "session-12345678-abcd", "agent": "dsh",
+                "goals": ["<goal_round> internal", "[model changed: internal]", "真实目标"],
+                "actions": ["The working directory changed internal", "真实动作"],
+                "results": ["<goal_blocked> internal"], "status": "in_progress"}
+        text = "\n".join(self.fmt.deterministic_sections([item], []))
+        self.assertNotIn("## 会话明细", text)
+        self.assertIn("#### Session 12345678", text)
+        self.assertIn("来源会话：session-12345678-abcd", text)
+        self.assertIn("真实目标", text)
+        self.assertIn("真实动作", text)
+        self.assertNotIn("internal", text)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hubmemory-format-test-")
         self.home = Path(self.temp.name)

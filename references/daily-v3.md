@@ -43,6 +43,7 @@ python3 scripts/daily_input.py --date YYYY-MM-DD
 
 - 保留唯一事实源 sessions.jsonl、程序派生 evidence.jsonl。
 - 新日报移除末尾 Agent-readable summary JSON，不生成相同内容的 JSON 旁车。
+- 不再重复输出「会话明细」；仅保留统计和工作事项，详细会话按引用查阅。工作事项短编号移除公共 session- 前缀，仍保留完整来源 ID；过滤自动续跑、模型切换及工作目录通知。旧 v3 含会话明细仍可验证。
 - MANIFEST 使用现有证据；hub day 默认只读 TL;DR 与全天总结，完整明细按需读取。
 - 历史 v2 日报读取兼容，不因格式版本自动重写旧报告或丢掉旧引用。
 - 月报是独立契约，本次不擅自扩大为重写全部月报格式。

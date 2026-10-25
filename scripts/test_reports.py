@@ -132,7 +132,8 @@ class ReportsTest(unittest.TestCase):
         self.assertIn("event=evt-1", out)
         self.assertIn("session=session-full-id", out)
         self.assertIn("## 数据统计", out)
-        self.assertIn("## 会话明细", out)
+        self.assertNotIn("## 会话明细", out)
+        self.assertIn("## 工作事项", out)
         self.assertIn("未确认", out)
         from report_contract import validate_report
         validate_report(out, "daily", self.day, self.home)

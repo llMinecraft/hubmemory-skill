@@ -444,6 +444,21 @@ def render_stats(stats: dict) -> list[str]:
     ]
 
 
+def _display_texts(values: list) -> list[str]:
+    """Filter internal notifications from the derived view, not source facts."""
+    prefixes = ("<goal_round>", "<goal_blocked>", "<goal_", "[model changed:",
+                "[schedule reminder]", "the working directory changed",
+                "# agents.md instructions", "<heartbeat>")
+    result = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text.lower().startswith(prefixes):
+            continue
+        if text not in result:
+            result.append(text)
+    return result
+
+
 def _render_work_items(evidence: list[dict]) -> list[str]:
     lines = ["## 工作事项（程序生成，来源声称不等于已验证交付）"]
     if not evidence:
@@ -454,10 +469,14 @@ def _render_work_items(evidence: list[dict]) -> list[str]:
         lines.append(f"### {agent}")
         for item in [e for e in evidence if str(e.get("agent") or "unknown") == agent]:
             sid = str(item.get("session_id") or "unknown")
-            goals = item.get("goals") or ["未识别到明确目标"]
-            actions = item.get("actions") or []
+            goals = _display_texts(item.get("goals") or []) or ["未识别到明确目标"]
+            actions = _display_texts(item.get("actions") or [])
+            display_item = dict(item, actions=actions,
+                                results=_display_texts(item.get("results") or []))
+            # Strip the shared DSH prefix; keep the full identity below.
+            short_sid = sid.removeprefix("session-")[:8]
             lines.extend([
-                f"#### Session {sid[:8]}",
+                f"#### Session {short_sid}",
                 f"- 时间：{str(item.get('started_at') or '?')[:19].replace('T', ' ')}"
                 f" - {str(item.get('ended_at') or '?')[:19].replace('T', ' ')}",
                 f"- 工作事项：" + "；".join(_clip(g, 160) for g in goals[:3]),
@@ -466,7 +485,7 @@ def _render_work_items(evidence: list[dict]) -> list[str]:
                 lines.append("- 主要动作：")
                 lines.extend(f"  - {_clip(a, 200)}" for a in actions[:4])
             lines.extend([
-                f"- 来源结论：{_record_conclusion(item)}",
+                f"- 来源结论：{_record_conclusion(display_item)}",
                 f"- 状态：{_status_label(item)}",
                 f"- 来源会话：{sid}",
             ])
@@ -502,7 +521,7 @@ def _render_sessions(events: list[dict]) -> list[str]:
 
 def deterministic_sections(evidence: list[dict], events: list[dict]) -> list[str]:
     return render_stats(stats_for(evidence, events)) + [""] + \
-        _render_work_items(evidence) + [""] + _render_sessions(events)
+        _render_work_items(evidence)
 
 
 def assemble_daily_report(overview: str, period: str, evidence: list[dict],
@@ -572,7 +591,9 @@ def validate_assembled_report(text: str, period: str, ref_map: dict[int, dict] |
                 info = ref_map.get(n)
                 if info is not None and info["event_id"] != cited_event:
                     raise ValueError("source_map_entry_mismatch:" + n_str)
-    if "## 数据统计" not in text or "## 工作事项" not in text or "## 会话明细" not in text:
+    # Legacy v3 reports may contain session details; new reports omit this
+    # redundant view. Statistics and work items remain required.
+    if "## 数据统计" not in text or "## 工作事项" not in text:
         raise ValueError("missing_deterministic_sections")
 
 
