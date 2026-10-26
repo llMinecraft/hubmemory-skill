@@ -23,9 +23,15 @@ hubmemory 是一个面向本机多 Agent 的共享记忆 Skill。它监听 Claud
 
 ## 日报 v3：只为总结使用 AI
 
-AI 仅生成有层次的「全天总结」：今天做了哪些事、主要结果、待办与阻塞。正文只用 `[n]` 引用，程序在总结末尾列来源；不堆路径、代码和原始提示词。TL;DR、统计、状态和会话明细都由程序生成，新日报不再嵌入重复 JSON。已有事实 JSONL、证据 JSONL、租约与校验 JSON 继续保留；旧版日报兼容读取。
+AI 仅生成有层次的「全天总结」：今天做了哪些事、主要结果、待办与阻塞。正文只用 `[n]` 引用，程序在总结末尾列来源；不堆路径、代码和原始提示词。TL;DR、统计、状态和工作事项都由程序生成（不再重复列会话明细），新日报不再嵌入重复 JSON。已有事实 JSONL、证据 JSONL、租约与校验 JSON 继续保留；旧版日报兼容读取。
 
 领取日报后运行 `python3 scripts/daily_report.py --date YYYY-MM-DD --pack` 获取只读编号证据包，AI 只写 `## 全天总结` 候选，再通过原 session/token 的 `report_due.py publish` 发布。模型输出不会直接覆盖完整报告。详见 [日报 v3 协议](references/daily-v3.md)。
+
+## 渐进式证据读取
+
+`hub search '<主题>' --budget 800` 先给有界结果与来源；需要上下文时用 `hub read --date YYYY-MM-DD --session <完整ID> --event <精确ID> --budget 1000` 获取锚点、前置问题和相邻回答。输出标明省略/裁剪，原始 JSONL 不变，损坏归档拒绝读取。常见凭据在预算检索摘要和该 L2 输出层遮蔽（并非未知格式的完整 DLP 保证）。待报告队列仅显示3项及真实总数，不再反复淹没证据。
+
+源码学习、取舍与未完成项：[deja-vu 审阅记录](references/deja-vu-review.md)。
 
 ## 平台与依赖
 

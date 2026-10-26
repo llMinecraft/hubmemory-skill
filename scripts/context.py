@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from hybrid_query import search
+from privacy import redact, redact_value
 
 HUB_HOME = Path(os.environ.get("HUBMEMORY_HOME", os.path.expanduser("~/hubmemory")))
 RECENT_HINT_RE = re.compile(
@@ -50,13 +51,14 @@ def compact_hit(record: dict) -> dict:
     meta = {k: full_meta[k] for k in (
         "intent", "coverage", "relevance", "scope", "delivery_state", "timestamp", "source_line", "query_clean"
     ) if k in full_meta}
+    meta = redact_value(meta)
     if "strong_coverage" in full_meta:
         meta.setdefault("coverage", full_meta["strong_coverage"])
     if "delivery" in full_meta:
         meta.setdefault("delivery_state", full_meta["delivery"])
     artifacts = full_meta.get("artifacts", record.get("artifacts", record.get("_artifacts", [])))
     artifacts = [{"path": a.get("resolved") or a.get("path"),
-                  "label": a.get("label", "")[:100]}
+                  "label": redact(a.get("label", ""))[:100]}
                  for a in artifacts if isinstance(a, dict) and not a.get("source_ref")][:3]
     line_number = record.get("_source_line") or meta.get("source_line")
     ref = record.get("_path")
@@ -66,7 +68,7 @@ def compact_hit(record: dict) -> dict:
         "agent": record.get("agent"),
         "cwd": record.get("cwd"),
         "confidence": _confidence(record),
-        "line": _pick_line(record)[:240],
+        "line": redact(_pick_line(record))[:240],
         "score": record.get("_score"),
         "ref": ref,
         "source_line": line_number,
@@ -114,6 +116,9 @@ def render(payload: dict) -> str:
         lines.append("pending reports: " + ", ".join(
             "%s %s[%s]" % (p["kind"], p["period"], p["status"])
             for p in payload["pending_reports"]))
+    if payload.get("pending_reports_omitted"):
+        lines.append("pending reports: %s total; %s not listed (report_due.py list for full queue)" % (
+            payload.get("pending_reports_total", 0), payload["pending_reports_omitted"]))
     if payload["results"]:
         first = payload["results"][0]["retrieval"]
         lines.append("topic: %s | scope: %s" % (first.get("query_clean", "-"), first.get("scope", "-")))
@@ -140,10 +145,14 @@ def build_payload(query: str, raw: list[dict], budget: int = 1200,
                   pending: list[dict] | None = None, json_output: bool = False) -> dict:
     hits = [compact_hit(r) for r in raw]
     payload = {
-        "query": query, "hint": routing_hint(query), "budget_tokens": budget,
+        "query": redact(query), "hint": routing_hint(query), "budget_tokens": budget,
         "returned_tokens_est": 0, "results": [], "dropped_by_budget": len(hits),
         "sufficiency": "thin", "sufficiency_reason": "no matching evidence",
-        "pending_reports": pending or [],
+        # The full administrative backlog is available via report_due list;
+        # do not spend the evidence budget repeating it on every lookup.
+        "pending_reports": (pending or [])[:3],
+        "pending_reports_total": len(pending or []),
+        "pending_reports_omitted": max(0, len(pending or []) - 3),
     }
     encode = (lambda p: json.dumps(p, ensure_ascii=False, indent=2)) if json_output else render
     # Never force an oversized first result into the response. Pointers and IDs
