@@ -9,6 +9,8 @@
     hub query <query>      full-record search (wraps query.py)
     hub read --date D --session ID [--event ID] [--budget N]
                            bounded L2 exchange with exact hot/cold provenance
+    hub index <status|rebuild|clear>  inspect/rebuild disposable retrieval cache
+    hub decision <mark|list>          evidence-backed decision history
     hub doctor             health checks
     hub init               bootstrap watcher + scheduler for this OS
     hub manifest           print MANIFEST.md
@@ -130,6 +132,10 @@ def main():
         return day_view(day_arg or datetime.now().date().isoformat(), full=full)
     if cmd == "search":
         return run("context.py", *rest) if rest else print("usage: hub search <query> [--budget N]")
+    if cmd == "decision":
+        return run("decision_state.py", *rest)
+    if cmd == "index":
+        return run("retrieval_index.py", *rest)
     if cmd == "read":
         return run("recall_read.py", *rest)
     if cmd == "query":

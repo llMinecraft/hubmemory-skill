@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dependency-free hybrid retrieval for hubmemory.
 
-Pipeline (all deterministic, no persistent cache):
+Pipeline (all deterministic; disposable incremental token cache, scan escape hatch):
 
   1. intent     — retrieval_intent.parse_intent() splits the query into a
                   topic (`clean`) plus temporal / actor / artifact hints and
@@ -34,6 +34,7 @@ import ast
 import hashlib
 import json
 import math
+import os
 import re
 from collections import Counter
 from datetime import date, datetime, time, timedelta
@@ -217,11 +218,12 @@ def _make_doc(source: str, path: Path, record: dict[str, Any], text: str,
 
 
 def iter_documents(hub_home: Path, days: int = 30,
-                   ref_date: date | None = None) -> list[dict[str, Any]]:
+                   ref_date: date | None = None, *, exact_day: str | None = None,
+                   include_global: bool = True) -> list[dict[str, Any]]:
     """Load the scan window. `ref_date` anchors "today" for historical replays."""
     docs: list[dict[str, Any]] = []
     memory_path = hub_home / "memory" / "memories.jsonl"
-    for record, line_no in _iter_jsonl(memory_path):
+    for record, line_no in (_iter_jsonl(memory_path) if include_global else []):
         if record.get("status") in {"superseded", "stale", "archived"}:
             continue
         docs.append(_make_doc("memory", memory_path, record,
@@ -237,6 +239,8 @@ def iter_documents(hub_home: Path, days: int = 30,
     else:
         all_days = [p.name for p in daily_root.glob("20??-??-??")]
     for day_name in sorted(all_days, reverse=True):
+        if exact_day is not None and day_name != exact_day:
+            continue
         try:
             day = date.fromisoformat(day_name)
         except ValueError:
@@ -307,7 +311,7 @@ def iter_documents(hub_home: Path, days: int = 30,
                          "cold_overlay": is_hot}, cold_text))
 
     for path in (hub_home / "profile" / "constraints.md", hub_home / "profile" / "preferences.md"):
-        if path.exists():
+        if include_global and path.exists():
             docs.append(_make_doc("profile", path, {"title": path.name},
                                   path.read_text(encoding="utf-8", errors="replace")))
     return docs
@@ -564,7 +568,8 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
            cwd: str | None = None, agent: str | None = None,
            now: datetime | str | None = None,
            as_of: datetime | str | None = None,
-           exclude_session: str | None = None) -> list[dict[str, Any]]:
+           exclude_session: str | None = None,
+           use_index: bool | None = None) -> list[dict[str, Any]]:
     """Hybrid retrieval over hubmemory.
 
     Backward compatible: positional (hub_home, query) + days/limit/cwd/agent.
@@ -616,8 +621,28 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
     }
     weak_terms = [t for t in query_tokens if t not in strong_terms]
 
-    docs = iter_documents(hub_home, days, ref_date=ref_date)
+    enabled = use_index if use_index is not None else os.environ.get(
+        "HUBMEMORY_RETRIEVAL_INDEX", "1").lower() not in {"0", "false", "off"}
+    index_stats = {"mode": "scan"}
+    if enabled:
+        from retrieval_index import load_documents, make_hybrid_loader
+        try:
+            docs, _, stats = load_documents(hub_home, days, ref_date,
+                loader=make_hybrid_loader(hub_home), tokenizer=tokenize)
+            index_stats = {k: v for k, v in stats.items() if k in {
+                "docs", "hit_count", "miss_count", "elapsed_ms", "fallback"}}
+            index_stats["mode"] = "scan_fallback" if stats.get("fallback") else "incremental_tokens"
+        except ValueError:
+            # Preserve the scan API: cold reader quarantines corrupt members
+            # and records integrity warnings. NEVER use cached stale content.
+            docs = iter_documents(hub_home, days, ref_date=ref_date)
+            index_stats = {"mode": "scan_fallback", "fallback": True,
+                           "reason": "index_or_archive_validation"}
+    else:
+        docs = iter_documents(hub_home, days, ref_date=ref_date)
     docs = [d for d in docs if _within_cutoff(d, cutoff, ref_date)]
+    from decision_state import annotate_documents
+    docs = annotate_documents(docs, hub_home, as_of=cutoff)
     if exclude_session:
         # Exact IDs only: 'session-' is a common prefix and must not silently
         # erase all DSH sessions under an allegedly unique-prefix API.
@@ -631,7 +656,8 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
     if not docs:
         return []
 
-    document_tokens = [Counter(tokenize(doc["text"])) for doc in docs]
+    document_tokens = [Counter(doc["_index_tokens"]) if "_index_tokens" in doc
+                       else Counter(tokenize(doc["text"])) for doc in docs]
     document_lengths = [sum(tokens.values()) for tokens in document_tokens]
     average_length = max(1.0, sum(document_lengths) / max(1, len(document_lengths)))
     document_frequency = Counter()
@@ -721,7 +747,10 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
         if echo:
             score *= ECHO_FACTOR
 
+        decision = doc.get("decision") or {}
         out = dict(record)
+        if decision.get("state") not in {None, "unmarked"} or not decision.get("recommended", True):
+            out["_decision"] = decision
         out.update({"_source": doc["source"], "_path": doc["path"],
                     "_score": round(score, 4), "_source_line": doc["line"]})
         if doc.get("conflict_of"):
@@ -729,6 +758,7 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
         if artifacts:
             out["artifacts"] = artifacts
         out["_retrieval"] = {
+            "index": index_stats,
             "query_clean": clean_query,
             "removed": intent.get("removed") or [],
             "intent": {
@@ -769,10 +799,12 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
             item.get("title") or item.get("goals") or item.get("text")
             or item.get("content") or item.get("narrative") or ""
         ).split())[:240]
-        key = (
-            item.get("_path"),
-            hashlib.sha1(body.encode("utf-8")).hexdigest()[:12],
-        )
+        # Different memory IDs can share a title but represent alternative
+        # decisions; never deduplicate away the accepted replacement.
+        key = ((item.get("_path"), "memory", item.get("id"))
+               if item.get("_source") == "memory" and item.get("id") else (
+                   item.get("_path"),
+                   hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]))
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -783,7 +815,8 @@ def search(hub_home: Path, query: str, *, days: int = 30, limit: int = 20,
         meta = item["_retrieval"]
         local = (meta["scope"] == "cwd" and meta["strong_coverage"] >= 0.5
                  and not meta["echo"])
-        return (0 if local else 1, -item["_score"],
+        historical = not (item.get("_decision") or {}).get("recommended", True)
+        return (1 if historical else 0, 0 if local else 1, -item["_score"],
                 str(item.get("period") or item.get("ts") or ""),
                 str(item.get("session_id") or ""))
     deduped.sort(key=rank_key)

@@ -31,7 +31,11 @@ AI 仅生成有层次的「全天总结」：今天做了哪些事、主要结�
 
 `hub search '<主题>' --budget 800` 先给有界结果与来源；需要上下文时用 `hub read --date YYYY-MM-DD --session <完整ID> --event <精确ID> --budget 1000` 获取锚点、前置问题和相邻回答。输出标明省略/裁剪，原始 JSONL 不变，损坏归档拒绝读取。常见凭据在预算检索摘要和该 L2 输出层遮蔽（并非未知格式的完整 DLP 保证）。待报告队列仅显示3项及真实总数，不再反复淹没证据。
 
-源码学习、取舍与未完成项：[deja-vu 审阅记录](references/deja-vu-review.md)。
+检索默认使用可重建 SQLite 文档/词频增量缓存，仅重建变化的日期；原 BM25 排名与精确引用不变。可用 `--no-index` 对照源扫描，`hub index status|rebuild|clear` 管理缓存。缓存含私有数据副本（0600），首次构建与磁盘空间有代价；不是新的向量库。
+
+`hub decision mark|list` 记录带原因/来源的 accepted、rejected、superseded 决定，追加日志而不改写原记忆。检索保留旧决定作为历史警告并降序，支持排他历史截止。来源ID是操作者提供，并非自动事实认证。
+
+使用、边界及真实性能：[增量检索与决策状态](references/incremental-recall.md)。源码学习与取舍：[deja-vu 审阅记录](references/deja-vu-review.md)。
 
 ## 平台与依赖
 

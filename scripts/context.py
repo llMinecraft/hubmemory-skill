@@ -60,6 +60,16 @@ def compact_hit(record: dict) -> dict:
     artifacts = [{"path": a.get("resolved") or a.get("path"),
                   "label": redact(a.get("label", ""))[:100]}
                  for a in artifacts if isinstance(a, dict) and not a.get("source_ref")][:3]
+    decision = record.get("_decision") or {}
+    if decision.get("state") not in {None, "unmarked"} or not decision.get("recommended", True):
+        meta["decision"] = redact_value({k: decision[k] for k in (
+            "state", "recommended", "caution", "reason", "ts", "effective_at", "replaced_by", "event_id"
+        ) if k in decision})
+        latest = (decision.get("history") or [{}])[-1]
+        meta["decision"]["source_session_ids"] = decision.get("source_session_ids", latest.get("source_session_ids", []))
+        meta["decision"]["source_event_ids"] = decision.get("source_event_ids", latest.get("source_event_ids", []))
+    if full_meta.get("index"):
+        meta["index"] = full_meta["index"]
     line_number = record.get("_source_line") or meta.get("source_line")
     ref = record.get("_path")
     return {
@@ -94,6 +104,8 @@ def assess_sufficiency(hits: list[dict]) -> tuple[str, str]:
         return "thin", "no matching evidence; check live sessions or clarify the subject"
     meta = hits[0].get("retrieval") or {}
     coverage = meta.get("coverage", meta.get("relevance", 0))
+    if not (meta.get("decision") or {}).get("recommended", True):
+        return "thin", "historical decision withdrawn, replaced or uncertain; inspect state evidence"
     if meta.get("delivery_state") == "planned":
         return "thin", "source describes a plan, not a completed deliverable"
     intent = meta.get("intent") or {}
@@ -130,6 +142,16 @@ def render(payload: dict) -> str:
         lines.append("- [%s|%s|%s] %s" % (
             str(hit["kind"] or "unknown") + ("/cold" if ".tar.gz!" in str(hit.get("locator", "")) else ""), hit["timestamp"] or hit["period"] or "-",
             meta.get("delivery_state", "evidence"), hit["line"]))
+        if meta.get("decision"):
+            decision = meta["decision"]
+            lines.append("    decision: %s; %s" % (decision.get("state", "uncertain"),
+                decision.get("caution") or decision.get("reason") or "source-reported state"))
+            if decision.get("replaced_by"):
+                lines.append("    replaced by: " + ", ".join(decision["replaced_by"]))
+            if decision.get("source_event_ids") or decision.get("source_session_ids"):
+                lines.append("    state source: events=%s; sessions=%s" % (
+                    ",".join(decision.get("source_event_ids", [])),
+                    ",".join(decision.get("source_session_ids", []))))
         lines.append("    ref: %s" % hit["locator"])
         lines.append("    session: %s | event: %s" % (hit["session"] or "-", hit["event_id"] or "-"))
         if hit.get("cwd"):
@@ -188,6 +210,7 @@ def main() -> int:
     parser.add_argument("--budget", type=int, default=1200)
     parser.add_argument("--as-of", help="ISO timestamp: reproducible pre-question retrieval")
     parser.add_argument("--exclude-session", help="exclude this session to avoid self-echo")
+    parser.add_argument("--no-index", action="store_true", help="scan source files; bypass disposable token cache")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.budget < 160:
@@ -203,6 +226,8 @@ def main() -> int:
         if item.get("status") != "done":
             pending.append({k: item.get(k) for k in ("kind", "period", "status")})
     kwargs = dict(days=args.days, limit=args.limit, cwd=args.cwd, agent=args.agent)
+    if args.no_index:
+        kwargs["use_index"] = False
     if args.as_of:
         kwargs["as_of"] = args.as_of
     if args.exclude_session:

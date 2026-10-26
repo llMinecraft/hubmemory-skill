@@ -273,6 +273,8 @@ watcher 管理：
 - `--as-of <ISO时间>`：排他历史截止点，防止后续提问/复盘污染盲测；`--exclude-session <完整ID>`：排除当前会话自回声。已交付状态仅代表来源声称，需要读取实体文件。
 - 优化设计和验收：`references/optimization-plan.md`；隔离回归：`python3 scripts/test_retrieval.py`。
 - `query.py`：旧接口，返回完整记录，适合人工排查。
+- 默认使用可重建的增量文档/词频缓存；`hub search ... --no-index` 或 `HUBMEMORY_RETRIEVAL_INDEX=0` 对照源扫描。`hub index status|rebuild|clear` 只管理缓存，不替代归档。
+- 记忆的撤回/替代只能来自明确决定：`hub decision mark --memory <ID> --decision rejected --reason <原因> --source-event <来源>`；替代需 `--decision superseded --replacement <new_ID>`。原记忆保留，状态追加日志；检索警告不可推荐的历史方案，不能把它当作当前约束。`hub decision list --json` 查来源；来源ID由操作者提供，未自动认证。
 - 问"最近/昨天干了什么"先看 MANIFEST，别先跑全文检索。
 
 ### diary 契约（生成方必须遵守）

@@ -7,6 +7,20 @@ from context import build_payload, render, estimate_tokens
 
 
 class RecallSafetyTest(unittest.TestCase):
+    def test_withdrawn_state_survives_compact_output_and_never_sufficient(self):
+        raw=[{'_source':'memory','id':'m1','text':'旧连接池方案',
+              '_retrieval':{'coverage':1}, '_decision':{
+                  'state':'rejected','recommended':False,'caution':'historical: rejected',
+                  'reason':'真实故障后撤回','replaced_by':['m2'],
+                  'history':[{'source_event_ids':['source-e'], 'source_session_ids':['source-s']}]}}]
+        p=build_payload('连接池',raw,1200)
+        self.assertEqual(p['sufficiency'],'thin')
+        text=render(p)
+        self.assertIn('rejected',text)
+        self.assertIn('m2',text)
+        self.assertIn('source-e',text)
+        self.assertIn('source-s',text)
+
     def test_recognized_credentials_masked_idempotently(self):
         secrets = ['ghp_'+'x'*36, 'sk-'+'a'*30, 'Bearer '+'z'*25,
                    'API_KEY="'+'q'*30+'"', 'password=MySecret!123',
