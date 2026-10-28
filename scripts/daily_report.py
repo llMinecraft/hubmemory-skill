@@ -163,6 +163,10 @@ def call_llm(endpoint: str, model: str, system: str, user: str, timeout: int = 6
         ],
         "temperature": 0.3,
         "max_tokens": 2000,
+        # Qwen3 reasoning can consume the entire completion budget on the
+        # large daily evidence pack and leave message.content empty. Daily
+        # summaries need the concise answer channel, not hidden reasoning.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
