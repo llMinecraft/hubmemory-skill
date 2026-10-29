@@ -12,12 +12,17 @@ Deterministic only — it never calls a model. It:
     python3 session_start.py              # human + agent readable
     python3 session_start.py --json       # machine readable
     python3 session_start.py --budget 400 # cap manifest output size
+    python3 session_start.py --handoff --agent dsh --model <model> \
+        --session "$DSH_SESSION_ID"       # claim the newest daily + hand off
+                                          # real token, evidence pack and the
+                                          # publish command to this AI
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -33,6 +38,20 @@ DAILY_DIR = HUB_HOME / "daily"
 PID_PATH = HUB_HOME / "state" / "watcher.pid"
 HEALTH_PATH = HUB_HOME / "state" / "health.json"
 MANIFEST_PATH = HUB_HOME / "MANIFEST.md"
+REQUESTS_DIR = HUB_HOME / "reports" / "requests"
+
+# Compact startup output: the pending block lists at most the newest few
+# requests plus a count; the manifest is byte-bounded unless --budget 0.
+PENDING_DISPLAY_MAX = 5
+DEFAULT_MANIFEST_BUDGET = 8192
+
+# Model identity must never be fabricated: --handoff only accepts --model or
+# one of these harness-provided variables, in precedence order.
+TRUSTED_MODEL_ENV = (
+    "HUBMEMORY_MODEL", "DSH_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL",
+    "CODEX_MODEL", "OPENAI_MODEL",
+)
+SESSION_ENV = ("DSH_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID")
 
 sys.path.insert(0, str(SCRIPTS))
 import manifest as manifest_mod  # noqa: E402
@@ -154,6 +173,116 @@ def next_action(pending, watcher):
     return "none - memory is current"
 
 
+def _env_dsh_present():
+    return any(key.startswith("DSH_") for key in os.environ)
+
+
+def resolve_identity(agent=None, session=None, model=None):
+    """Resolve the claim identity. Never fabricate a model name: it must come
+    from --model or a trustworthy harness environment variable."""
+    resolved = {"agent": agent or ("dsh" if _env_dsh_present() else None),
+                "session": session or next(
+                    (os.environ[key] for key in SESSION_ENV
+                     if os.environ.get(key)), None),
+                "model": model or next(
+                    (os.environ[key] for key in TRUSTED_MODEL_ENV
+                     if os.environ.get(key)), None)}
+    missing = []
+    if not resolved["agent"] or resolved["agent"] == "unknown" or not resolved["session"]:
+        missing.append("identity")
+    if not resolved["model"] or resolved["model"] == "unknown":
+        missing.append("model")
+    return resolved, missing
+
+
+def _full_request(kind, period):
+    """Read the on-disk request including capability fields (the public
+    inventory redacts claim_token, which a same-owner resume needs)."""
+    return report_due.read_request(REQUESTS_DIR / f"{kind}-{period}.json")
+
+
+def _claimable_daily_candidates(agent, session):
+    """Daily requests this identity may take over, newest period first.
+
+    Own live leases come first so a session always resumes in-flight work
+    instead of opening a second lease. Other agents' active leases are never
+    stolen; expired leases are claimable again; today/future periods are
+    refused because the day is not closed."""
+    today = datetime.now().date().isoformat()
+    owned, free, foreign = [], [], []
+    for path in sorted(REQUESTS_DIR.glob("daily-*.json")):
+        req = report_due.read_request(path)
+        if not req or req.get("kind") != "daily" or req.get("status") == "done":
+            continue
+        period = req.get("period", "")
+        if not period or period >= today:
+            continue
+        if req.get("status") == "claimed" and report_due.lease_active(req):
+            if req.get("claimed_by") == agent and req.get("claimed_session") == session:
+                owned.append(req)
+            else:
+                foreign.append(req)
+            continue
+        free.append(req)
+    owned.sort(key=lambda r: r["period"], reverse=True)
+    free.sort(key=lambda r: r["period"], reverse=True)
+    return owned + free, foreign
+
+
+def _publish_command(agent, model, session, token, period):
+    q = shlex.quote
+    return (f"{q(sys.executable)} {q(str(SCRIPTS / 'report_due.py'))} publish "
+            f"--kind daily --period {q(period)} --agent {q(agent)} "
+            f"--model {q(model)} --session {q(session)} --token {q(token)} "
+            "--input <overview-candidate.md>")
+
+
+def handoff(agent, session, model):
+    """Claim (or resume) the newest claimable daily report for this identity
+    and hand the real claim token plus the bounded evidence pack to the
+    current AI. Deterministic only — no model calls."""
+    import daily_format
+    candidates, foreign = _claimable_daily_candidates(agent, session)
+    last_error = None
+    for req in candidates:
+        period = req["period"]
+        if req.get("status") == "claimed" and report_due.lease_active(req):
+            request = _full_request("daily", period)
+            token = request.get("claim_token")
+            if token:
+                action = "resumed"
+            else:
+                # Malformed claim without a token cannot be resumed; skip it
+                # rather than hand off a fabricated capability.
+                last_error = "active_lease_missing_token"
+                continue
+        else:
+            result = report_due.claim_request("daily", period, agent, model, session)
+            if not result.get("ok"):
+                last_error = result.get("error")
+                continue
+            request = result["request"]
+            token = request["claim_token"]
+            action = "claimed"
+        pack, ref_map = daily_format.build_evidence_prompt(HUB_HOME, period)
+        return {
+            "ok": True, "action": action, "kind": "daily", "period": period,
+            "agent": agent, "model": model, "session": session,
+            "claim_token": token, "claimed_at": request.get("claimed_at"),
+            "citations": len(ref_map),
+            "evidence_pack": pack,
+            "overview_instructions": daily_format.overview_prompt(period),
+            "publish_command": _publish_command(agent, model, session, token, period),
+        }
+    result = {"ok": False,
+              "error": last_error or "no_claimable_daily",
+              "foreign_active_leases": [
+                  {"kind": r.get("kind"), "period": r.get("period"),
+                   "claimed_by": r.get("claimed_by")}
+                  for r in foreign]}
+    return result
+
+
 def historical_backlog(pending):
     """Informational inventory only; never hide, delete, or defer requests."""
     from cold_storage import iter_day_files
@@ -187,10 +316,74 @@ def gather():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--budget", type=int, default=0,
-                        help="cap MANIFEST bytes; 0 = full")
+    parser.add_argument("--budget", type=int, default=None,
+                        help="cap MANIFEST bytes; 0 = full, omitted = %d"
+                             % DEFAULT_MANIFEST_BUDGET)
+    parser.add_argument("--agent", help="claiming agent label "
+                        "(default: dsh when a DSH_* env is present)")
+    parser.add_argument("--model", help="calling model name — required for "
+                        "--handoff unless a trusted model env var is set; "
+                        "never inferred")
+    parser.add_argument("--session", help="claiming session id "
+                        "(default: DSH_SESSION_ID)")
+    parser.add_argument("--handoff", action="store_true",
+                        help="claim/resume the newest claimable daily report "
+                             "for this identity and print the real claim "
+                             "token, bounded evidence pack and publish "
+                             "command instead of the manifest/backlog")
     args = parser.parse_args()
     data = gather()
+
+    if args.handoff:
+        identity, missing = resolve_identity(args.agent, args.session, args.model)
+        if missing:
+            result = {"ok": False, "error": "missing_" + "_".join(missing)}
+        else:
+            result = handoff(identity["agent"], identity["session"], identity["model"])
+        if args.json:
+            print(json.dumps({
+                "watcher": data["watcher"],
+                "enqueued_gaps": data["enqueued_gaps"],
+                "today_note": data["today_note"],
+                "handoff": result}, ensure_ascii=False, indent=2))
+        elif result.get("ok"):
+            print("== hubmemory daily report handoff ==")
+            print("%s daily report %s (agent=%s model=%s session=%s)"
+                  % (result["action"], result["period"], result["agent"],
+                     result["model"], result["session"]))
+            print("claim_token: %s" % result["claim_token"])
+            print("")
+            print("authoring instructions:")
+            print(result["overview_instructions"])
+            print("")
+            print("== evidence pack (%d citations, bounded) =="
+                  % result["citations"])
+            print(result["evidence_pack"])
+            print("")
+            print("== after writing the 「全天总结」 overview candidate file, publish ==")
+            # The publish command (real token) is always the last line.
+            print(result["publish_command"])
+        else:
+            print("== hubmemory daily report handoff ==")
+            print("handoff failed: %s" % result["error"])
+            if result["error"] == "missing_identity":
+                print("identity required: pass --agent and --session "
+                      "(agent defaults to dsh and session to DSH_SESSION_ID "
+                      "when present)")
+            elif result["error"] == "missing_model":
+                print("model required: pass --model <current model name>; "
+                      "it is never inferred or fabricated")
+            elif result["error"] == "missing_identity_model":
+                print("identity and model required: pass --agent, --session "
+                      "and --model")
+            for lease in result.get("foreign_active_leases") or []:
+                print("  - daily %s actively leased by %s (never steal)"
+                      % (lease.get("period"), lease.get("claimed_by")))
+            if result["error"] == "no_claimable_daily" \
+                    and not result.get("foreign_active_leases"):
+                print("no pending or resumable daily report; leave pending "
+                      "work for the next session, do not fabricate")
+        return 0 if result.get("ok") else 1
 
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -204,11 +397,17 @@ def main():
     ))
     if data["enqueued_gaps"]:
         print("enqueued missing diaries: %s" % ", ".join(data["enqueued_gaps"]))
-    if data["pending_reports"]:
-        print("pending reports:")
-        for r in data["pending_reports"]:
+    pending = data["pending_reports"]
+    if pending:
+        ordered = sorted(pending, key=lambda r: str(r.get("period", "")),
+                         reverse=True)
+        print("pending reports (%d):" % len(ordered))
+        for r in ordered[:PENDING_DISPLAY_MAX]:
             who = " by " + r["claimed_by"] if r.get("claimed_by") else ""
             print("  - %s %s [%s]%s" % (r["kind"], r["period"], r["status"], who))
+        if len(ordered) > PENDING_DISPLAY_MAX:
+            print("  … %d older requests omitted; see report_due.py list"
+                  % (len(ordered) - PENDING_DISPLAY_MAX))
     if data.get("historical_cold_backlog"):
         days = data["historical_cold_backlog"]
         print(f"historical cold backlog: {len(days)} requests ({days[0]} → {days[-1]}); preserved pending, newest daily handoff takes priority")
@@ -219,8 +418,9 @@ def main():
     print("")
     try:
         text = MANIFEST_PATH.read_text(encoding="utf-8")
-        if args.budget and len(text.encode("utf-8")) > args.budget:
-            text = text.encode("utf-8")[: args.budget].decode("utf-8", errors="ignore") + "\n…(truncated)\n"
+        budget = args.budget if args.budget is not None else DEFAULT_MANIFEST_BUDGET
+        if budget and len(text.encode("utf-8")) > budget:
+            text = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore") + "\n…(truncated)\n"
         print(text)
     except OSError:
         print("(MANIFEST.md missing)")

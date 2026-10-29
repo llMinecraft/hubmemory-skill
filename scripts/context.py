@@ -225,6 +225,9 @@ def main() -> int:
             continue
         if item.get("status") != "done":
             pending.append({k: item.get(k) for k in ("kind", "period", "status")})
+    # Surface yesterday ahead of the old backlog; earliest-first truncation
+    # used to hide the very report the current agent needed to pick up.
+    pending.sort(key=lambda r: (r.get("kind") == "daily", r.get("period", "")), reverse=True)
     kwargs = dict(days=args.days, limit=args.limit, cwd=args.cwd, agent=args.agent)
     if args.no_index:
         kwargs["use_index"] = False

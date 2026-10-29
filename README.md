@@ -108,6 +108,21 @@ bash scripts/install_skill_links.sh --target codex
 
 完整调用规范见 [SKILL.md](SKILL.md)。
 
+## 当前 AI 接管日报（2026-10-29 修复）
+
+日报必须由用户当前使用的会话模型本人完成；不是重新开一个 Qwen/API 代写。定时器只生成草稿和 pending，没有 Agent 在线时保留待办。
+
+```bash
+python3 scripts/session_start.py --handoff --agent dsh --model <当前真实模型> --session <完整会话ID>
+```
+
+交接优先最新可领取日报，返回真实 token、编号证据和发布命令。相同 Agent/session 的未完成租约可续接；不抢他人有效租约、不重复标记完成。当前模型生成全天总结候选后按返回命令 publish，只有校验成功才算完成。
+
+- DSH/Codex：全局指令需在 startup/resume/compact 和跨日首轮执行交接，不仅查看状态。
+- Claude：SessionStart command 指向 `python3 /完整路径/scripts/agent_session_hook.py`，matcher 为 `startup|resume|clear|compact`；从宿主 JSON 获取真实 session/model。身份缺失时输出让当前模型补齐的命令，不编造。
+- 普通 `session_start.py` 不领取；输出为有限近期队列，完整旧待办可用 `report_due.py list --json` 查看。检索也先显示新待办，避免历史积压盖住昨日任务。
+- 所有接入仍依赖宿主确实执行 hook/指令；此修复不是所有 AI 客户端的运行时拦截器，不能承诺忽略指令的模型也必然完成。
+
 ## 常用命令
 
 ```bash

@@ -18,7 +18,20 @@ python3 ~/.claude/skills/hubmemory/scripts/session_start.py
 
 ### 自动接管待汇总报告
 
-每次启动新会话时，在回答用户之前检查待处理的日报/月报：
+**用户正在使用哪个 AI 会话，就由该会话当前模型本人领取并总结；不要另开本地 Qwen、独立 API 或换模型代写。** 新会话、resume、compact/压缩续接和跨日后的首轮均要检查，不只第一次启动。普通状态命令不领取。
+
+优先使用完整交接入口（真实身份必填；未知不能编造）：
+
+```bash
+python3 ~/.claude/skills/hubmemory/scripts/session_start.py --handoff \
+  --agent <当前agent> --model <当前真实模型> --session <完整sessionID>
+```
+
+程序领取最新可领取日报，并直接返回真实 token、编号证据包、publish 命令；有效的同会话租约会续接。当前模型只写全天总结候选，**publish 成功后再回复用户**。不得看到 pending 后只报告问题、不得把领取当完成。其他会话有效租约不可抢；校验失败要说明并保留待办。没有 Agent 在线时保留 pending，不承诺无人时强制生成。
+
+Claude SessionStart hook 使用 `scripts/agent_session_hook.py` 从宿主 JSON 获取真实身份，覆盖 startup/resume/clear/compact。DSH/Codex 通过各自全局指令执行上述入口。此接入仍受宿主是否调用及模型是否执行影响，不宣称跨所有客户端有运行时强制拦截。
+
+兼容手动方式，在回答用户之前检查待处理的日报/月报：
 
 ```bash
 python3 ~/.claude/skills/hubmemory/scripts/report_due.py list --json
