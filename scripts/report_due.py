@@ -23,7 +23,18 @@ HUB_HOME = Path(os.environ.get("HUBMEMORY_HOME", os.path.expanduser("~/hubmemory
 REPORTS_DIR = HUB_HOME / "reports"
 REQUESTS_DIR = REPORTS_DIR / "requests"
 LOCK_PATH = REPORTS_DIR / ".lock"
+# A lease stays alive while its owner keeps working: it expires only after
+# CLAIM_TIMEOUT of owner inactivity (no claim/renew heartbeat and no watcher-
+# observed activity in the claiming session), and never outlives the
+# absolute CLAIM_MAX_AGE cap so a forgotten-but-chatty session cannot hold a
+# report forever.
 CLAIM_TIMEOUT = timedelta(hours=6)
+CLAIM_MAX_AGE = timedelta(hours=72)
+# A claim whose session the watcher never observes (e.g. a headless helper
+# session spawned by a plugin that fired the SessionStart hook but never
+# chats) is a ghost: release it quickly instead of blocking for hours.
+GHOST_TIMEOUT = timedelta(minutes=45)
+LIVE_INDEX = HUB_HOME / "live" / "index.json"
 
 
 def now():
@@ -92,18 +103,86 @@ def writer_guard(kind=None, period=None):
             yield
 
 
-def lease_active(request):
+def _parse_ts(value):
+    try:
+        stamp = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
+def owner_session_activity(session):
+    """Last watcher-observed activity of the claiming session, if known."""
+    if not session:
+        return None
+    try:
+        entry = json.loads(LIVE_INDEX.read_text(encoding="utf-8")).get(session)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(entry, dict):
+        return None
+    return _parse_ts(entry.get("last_activity"))
+
+
+def lease_last_seen(request):
+    """Newest owner liveness signal: claim, explicit renew, session activity."""
+    claimed = _parse_ts(request.get("claimed_at"))
+    if claimed is None:
+        return None
+    signals = [claimed, _parse_ts(request.get("lease_renewed_at")),
+               owner_session_activity(request.get("claimed_session"))]
+    current = now()
+    # Future-dated signals are ignored (clock skew / tampering).
+    return max(s for s in signals if s is not None and claimed <= s <= current + timedelta(minutes=5))
+
+
+def lease_active(request, owner_present=False):
+    """owner_present=True: the caller IS the verified owner session (host
+    hook identity), so the short ghost window does not apply."""
     if request.get("status") != "claimed":
         return False
-    try:
-        claimed = datetime.fromisoformat(request["claimed_at"])
-        return timedelta(0) <= now() - claimed < CLAIM_TIMEOUT
-    except (KeyError, TypeError, ValueError):
+    claimed = _parse_ts(request.get("claimed_at"))
+    if claimed is None:
         return False
+    current = now()
+    if not (timedelta(0) <= current - claimed < CLAIM_MAX_AGE):
+        return False
+    seen = lease_last_seen(request)
+    if seen is None:
+        return False
+    observed = owner_present \
+        or owner_session_activity(request.get("claimed_session")) is not None \
+        or request.get("lease_renewed_at")
+    window = CLAIM_TIMEOUT if observed else GHOST_TIMEOUT
+    return current - seen < window
+
+
+def lease_state(request):
+    """Human/doctor view: active, expired (reclaimable) or not claimed."""
+    if request.get("status") != "claimed":
+        return "unclaimed"
+    return "active" if lease_active(request) else "expired"
+
+
+def renew_claim(kind, period, agent, session, token):
+    """Owner heartbeat: extend the inactivity window of a live lease."""
+    handle = locked()
+    try:
+        path = request_path(kind, period)
+        request = read_request(path)
+        error = _ownership_error(request, agent, session, token, owner_present=True)
+        if error:
+            return {"ok": False, "error": error}
+        request["lease_renewed_at"] = timestamp()
+        write_request(path, request)
+        return {"ok": True, "request": public_request(request)}
+    finally:
+        lockutil.release_lock(handle)
 
 
 def _clear_claim(request):
-    for key in ("claimed_at", "claimed_by", "claimed_model", "claimed_session", "claim_token"):
+    for key in ("claimed_at", "claimed_by", "claimed_model", "claimed_session", "claim_token",
+                "lease_renewed_at"):
         request.pop(key, None)
 
 
@@ -237,6 +316,7 @@ def claim_request(kind, period, agent, model, session=None):
             return {"ok": False, "error": "already_done", "request": public_request(request)}
         if lease_active(request):
             return {"ok": False, "error": "already_claimed", "request": public_request(request)}
+        request.pop("lease_renewed_at", None)
         request.update(status="claimed", claimed_at=timestamp(), claimed_by=agent,
                        claimed_model=model, claimed_session=session, claim_token=secrets.token_urlsafe(32),
                        source_fingerprint=fingerprint)
@@ -246,8 +326,10 @@ def claim_request(kind, period, agent, model, session=None):
         lockutil.release_lock(handle)
 
 
-def _ownership_error(request, agent, session, token):
-    if not lease_active(request):
+def _ownership_error(request, agent, session, token, owner_present=True):
+    # Whoever presents the matching agent+session+token is the owner itself,
+    # so the ghost window never cuts off a real owner mid-publish.
+    if not lease_active(request, owner_present=owner_present):
         return "valid_claim_required"
     if not token or request.get("claimed_by") != agent or request.get("claimed_session") != session or not secrets.compare_digest(str(request.get("claim_token", "")), token):
         return "claim_owner_mismatch"
@@ -408,7 +490,7 @@ def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list").add_argument("--json", action="store_true")
-    for name in ("enqueue", "claim", "complete", "publish", "reopen", "release"):
+    for name in ("enqueue", "claim", "complete", "publish", "reopen", "release", "renew"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--kind", choices=("daily", "monthly"), required=True)
         cmd.add_argument("--period", required=True)
@@ -425,7 +507,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "list":
-            result = [r for r in all_requests() if r.get("status") != "done"]
+            result = [dict(r, lease=lease_state(read_request(request_path(r["kind"], r["period"]))))
+                      for r in all_requests() if r.get("status") != "done"]
         elif args.command == "enqueue":
             result = public_request(ensure_request(args.kind, args.period, args.source))
         elif args.command == "claim":
@@ -435,6 +518,8 @@ def main():
         elif args.command == "publish":
             text = sys.stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")
             result = publish_report(args.kind, args.period, text, args.agent, args.model, args.session, args.token, args.idempotent)
+        elif args.command == "renew":
+            result = renew_claim(args.kind, args.period, args.agent, args.session, args.token)
         elif args.command == "release":
             result = release_claim(args.kind, args.period, args.agent, args.session, args.token)
         else:

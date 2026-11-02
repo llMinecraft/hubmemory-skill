@@ -29,7 +29,11 @@ python3 ~/.claude/skills/hubmemory/scripts/session_start.py --handoff \
 
 程序领取最新可领取日报，并直接返回真实 token、编号证据包、publish 命令；有效的同会话租约会续接。当前模型只写全天总结候选，**publish 成功后再回复用户**。不得看到 pending 后只报告问题、不得把领取当完成。其他会话有效租约不可抢；校验失败要说明并保留待办。没有 Agent 在线时保留 pending，不承诺无人时强制生成。
 
-Claude SessionStart hook 使用 `scripts/agent_session_hook.py` 从宿主 JSON 获取真实身份，覆盖 startup/resume/clear/compact。DSH/Codex 通过各自全局指令执行上述入口。此接入仍受宿主是否调用及模型是否执行影响，不宣称跨所有客户端有运行时强制拦截。
+宿主接入（`python3 scripts/install_agent_hooks.py` 幂等安装，`--check` 只检查）：
+
+- **Claude / Codex**：宿主 hook 调 `scripts/agent_session_hook.py`（Codex 加 `--agent codex`）。`SessionStart`（startup/resume/clear/compact）自动交接；`UserPromptSubmit` 每轮跑 `session_start.py --remind`——无待办时零输出，有本会话未发布租约或近 3 天待领日报时输出一行提醒，并为本会话租约续期。Codex 的信任哈希从 Codex `hooks/list` 读回写入 `hooks.state`，`~/hubmemory` 加入 `sandbox_workspace_write.writable_roots`。每次触发记一行元数据到 `~/hubmemory/logs/agent_hooks.log`（不含提示词）。
+- **DSH**：无宿主 hook，`~/.dsh/AGENTS.md` 要求启动交接、每轮 `--remind`，写 `~/hubmemory` 被沙箱拒绝时提权重试同一命令。
+- `session_start.py` 写不了 MANIFEST 时只警告不崩溃；领取写不了时返回 `hub_not_writable` 和提权提示。
 
 兼容手动方式，在回答用户之前检查待处理的日报/月报：
 
@@ -53,7 +57,7 @@ python3 ~/.claude/skills/hubmemory/scripts/report_due.py publish \
   --session <当前完整会话ID> --token <claim_token> --input <候选Markdown文件>
 ```
 
-租约默认 6 小时；另一个 agent/session 不得抢有效租约。`complete` 兼容入口同样要求 session/token 和完整契约校验，不能靠改标题把草稿变终稿。月报仅在所属日报完成后可领取。
+租约按“持有者活跃度”续期：持有会话在 watcher 里有新活动、执行 `--remind`/`--handoff` 续接或 `report_due.py renew` 时都会刷新；**持有者连续 6 小时无任何活动**才过期可回收，所以长任务不会被抢。绝对上限 72 小时。watcher 从未见过的会话（如插件后台起的无对话会话）45 分钟无心跳即视为幽灵租约释放。另一个 agent/session 不得抢有效租约；`report_due.py list` 的 `lease` 字段显示 active/expired。`complete` 兼容入口同样要求 session/token 和完整契约校验，不能靠改标题把草稿变终稿。月报仅在所属日报完成后可领取。
 
 不要把模型私有思考写入报告；报告只记录有证据的目标、实际动作、结果、状态和下一步。一个 agent 已领取的任务不要重复处理。
 

@@ -17,7 +17,7 @@ class FakeResult:
         self.stderr = stderr
 
 
-def run_hook(payload, env=None, fake=None):
+def run_hook(payload, env=None, fake=None, argv=()):
     """Run main() with a fake subprocess; return (rc, stdout, stderr, cmds)."""
     env = {} if env is None else env
     cmds = []
@@ -29,7 +29,7 @@ def run_hook(payload, env=None, fake=None):
     out, err = io.StringIO(), io.StringIO()
     with patch.object(hook, "run_session_start", fake), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        rc = hook.main(stdin=stdin, env=env)
+        rc = hook.main(stdin=stdin, env=env, argv=list(argv))
     return rc, out.getvalue(), err.getvalue(), cmds
 
 
@@ -133,14 +133,44 @@ class FailureContractTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("session_start.py", out)
 
-    def test_child_failure_propagates_and_instructs(self):
+    def test_child_failure_never_blocks_and_instructs(self):
         def fake(cmd, timeout=hook.SUBPROCESS_TIMEOUT_S):
             return FakeResult(returncode=3, stdout="partial\n", stderr="boom\n")
         rc, out, err, _ = run_hook({"session_id": "s1"}, fake=fake)
-        self.assertEqual(rc, 3)
+        self.assertEqual(rc, 0)
         self.assertIn("partial", out)
         self.assertIn("boom", err)
         self.assertIn("session_start.py", out)
+
+
+class CodexAndReminderTest(unittest.TestCase):
+    def test_codex_agent_flag_and_env_model(self):
+        _, _, _, cmds = run_hook({"session_id": "c1", "hook_event_name": "SessionStart"},
+                                 env={"CODEX_MODEL": "gpt-x"}, argv=["--agent", "codex"])
+        cmd = cmds[0]
+        self.assertEqual(cmd[cmd.index("--agent") + 1], "codex")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-x")
+        self.assertIn("--handoff", cmd)
+
+    def test_unknown_agent_flag_falls_back_to_claude(self):
+        _, _, _, cmds = run_hook({"session_id": "c1"}, argv=["--agent", "evil;rm"])
+        self.assertEqual(cmds[0][cmds[0].index("--agent") + 1], "claude")
+
+    def test_user_prompt_submit_runs_read_only_remind(self):
+        _, _, _, cmds = run_hook({"session_id": "c2", "hook_event_name": "UserPromptSubmit",
+                                  "prompt": "hi"}, argv=["--agent", "codex"])
+        self.assertIn("--remind", cmds[0])
+        self.assertNotIn("--handoff", cmds[0])
+
+    def test_remind_without_session_is_silent(self):
+        rc, out, _, cmds = run_hook({"hook_event_name": "UserPromptSubmit"})
+        self.assertEqual((rc, out, cmds), (0, "", []))
+
+    def test_remind_failure_is_silent(self):
+        def fake(cmd, timeout=hook.SUBPROCESS_TIMEOUT_S):
+            return FakeResult(returncode=1)
+        rc, out, _, _ = run_hook({"session_id": "s", "hook_event_name": "UserPromptSubmit"}, fake=fake)
+        self.assertEqual((rc, out), (0, ""))
 
 
 class StdoutHygieneTest(unittest.TestCase):

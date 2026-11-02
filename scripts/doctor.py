@@ -113,14 +113,17 @@ def check_claims():
                 stuck.append(p.name + "(unreadable)")
                 continue
             if r.get("status") == "claimed":
+                import report_due
+                if report_due.lease_active(r):
+                    continue  # owner is still working (activity-renewed lease)
                 try:
                     age_h = (datetime.now().astimezone()
                              - datetime.fromisoformat(r["claimed_at"]).astimezone()).total_seconds() / 3600
-                    if age_h > 6:
-                        stuck.append("%s claimed %.1fh ago by %s"
-                                     % (r.get("id"), age_h, r.get("claimed_by")))
                 except (KeyError, ValueError, TypeError):
-                    pass
+                    age_h = float("nan")
+                # Expired leases are reclaimable by the next handoff, not a fault.
+                pending.append("%s (expired lease by %s, claimed %.1fh ago — reclaimable)"
+                               % (r.get("id"), r.get("claimed_by"), age_h))
             elif r.get("status") == "pending":
                 pending.append(r.get("id"))
     if stuck:
@@ -175,6 +178,42 @@ def check_deps():
           "ok" if not missing else "missing: " + ", ".join(missing))
 
 
+def check_agent_hooks():
+    """Static config check (fast; no Codex app-server round trip)."""
+    problems = []
+    home = Path.home()
+    try:
+        claude = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8")).get("hooks", {})
+    except (OSError, ValueError):
+        claude = {}
+    codex_dir = Path(os.environ.get("CODEX_HOME", home / ".codex"))
+    try:
+        codex = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8")).get("hooks", {})
+    except (OSError, ValueError):
+        codex = None
+    def has(hooks, event):
+        return any("agent_session_hook.py" in h.get("command", "")
+                   for g in (hooks or {}).get(event, []) for h in g.get("hooks", []))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        if (home / ".claude").exists() and not has(claude, event):
+            problems.append("claude:" + event)
+        if codex_dir.exists() and not has(codex, event):
+            problems.append("codex:" + event)
+    if codex_dir.exists():
+        try:
+            config = (codex_dir / "config.toml").read_text(encoding="utf-8")
+        except OSError:
+            config = ""
+        if str(HUB_HOME) not in config:
+            problems.append("codex:writable_roots")
+    log = HUB_HOME / "logs" / "agent_hooks.log"
+    last = log.read_text(encoding="utf-8").strip().splitlines()[-1][:25] if log.exists() and log.stat().st_size else "never"
+    if problems:
+        check("agent_hooks", False, "missing %s - run install_agent_hooks.py" % ", ".join(problems))
+    else:
+        check("agent_hooks", True, "claude+codex hooks installed; last fired %s" % last)
+
+
 def check_gaps():
     today = datetime.now().date()
     gaps = []
@@ -195,6 +234,7 @@ def main():
     check_jsonl()
     check_deps()
     check_gaps()
+    check_agent_hooks()
 
     if "--json" in sys.argv:
         print(json.dumps(CHECKS, ensure_ascii=False, indent=2))

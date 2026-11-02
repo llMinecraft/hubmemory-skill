@@ -302,6 +302,113 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(payload["error"], "no_claimable_daily")
         self.assertEqual(payload["foreign_active_leases"], [])
 
+    # -- activity-based lease + per-turn reminder ---------------------------
+
+    def live(self, session, minutes_ago):
+        path = self.home / "live" / "index.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        stamp = (datetime.now().astimezone() - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+        data[session] = {"agent": "claude", "status": "active", "last_activity": stamp}
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_long_running_owner_keeps_lease_past_six_hours(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "sess-busy", hours_ago=9, token="busy-tok")
+        self.live("sess-busy", minutes_ago=10)   # owner still working
+        result, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["foreign_active_leases"][0]["period"], self.day)
+        self.assertEqual(self.read_request("daily", self.day)["claim_token"], "busy-tok")
+
+    def test_idle_owner_lease_expires_after_six_hours_of_inactivity(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "sess-gone", hours_ago=9, token="gone-tok")
+        self.live("sess-gone", minutes_ago=7 * 60)
+        _, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["action"], "claimed")
+
+    def test_absolute_cap_releases_chatty_forgotten_lease(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "sess-chatty", hours_ago=80, token="old")
+        self.live("sess-chatty", minutes_ago=1)
+        _, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertTrue(payload["ok"], payload)
+
+    def test_resume_renews_lease_heartbeat(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, ME["agent"], ME["session"], hours_ago=5, token="mine")
+        _, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertEqual((payload["action"], payload["claim_token"]), ("resumed", "mine"))
+        self.assertIn("lease_renewed_at", self.read_request("daily", self.day))
+
+    def test_renew_cli_requires_owner_token(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "s1", hours_ago=0, token="tok-1")
+        env = dict(os.environ, HUBMEMORY_HOME=str(self.home))
+        bad = subprocess.run([sys.executable, str(DUE), "renew", "--kind", "daily", "--period", self.day,
+                              "--agent", "claude", "--session", "s1", "--token", "nope"],
+                             capture_output=True, text=True, env=env)
+        self.assertNotEqual(bad.returncode, 0)
+        ok = subprocess.run([sys.executable, str(DUE), "renew", "--kind", "daily", "--period", self.day,
+                             "--agent", "claude", "--session", "s1", "--token", "tok-1"],
+                            capture_output=True, text=True, env=env)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+    def test_ghost_claim_unseen_by_watcher_released_quickly(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "sess-ghost", hours_ago=1, token="ghost")
+        _, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertTrue(payload["ok"], payload)
+
+    def test_fresh_claim_not_yet_indexed_is_protected(self):
+        self.enqueue(self.day)
+        self.claimed(self.day, "claude", "sess-new", hours_ago=0.2, token="new")
+        _, payload = self.handoff_json(
+            "--agent", ME["agent"], "--model", ME["model"], "--session", ME["session"])
+        self.assertFalse(payload["ok"])
+
+    def recent(self, days_ago):
+        return (datetime.now().date() - timedelta(days=days_ago)).isoformat()
+
+    def test_remind_silent_when_nothing_recent(self):
+        self.enqueue(self.day)  # 2020 backlog never nags
+        result = self.run_start("--remind", "--agent", "codex", "--session", "c1")
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+
+    def test_remind_points_to_recent_waiting_daily_and_is_read_only(self):
+        day = self.recent(1)
+        self.enqueue(day)
+        before = self.read_request("daily", day)
+        result = self.run_start("--remind", "--agent", "codex", "--session", "c1")
+        self.assertIn("daily report %s is waiting" % day, result.stdout)
+        self.assertIn("--handoff --agent codex", result.stdout)
+        self.assertEqual(self.read_request("daily", day), before)
+
+    def test_remind_tells_owner_to_publish_held_lease(self):
+        day = self.recent(1)
+        self.enqueue(day)
+        self.claimed(day, "codex", "c1", hours_ago=5)   # watcher never saw c1
+        own = self.run_start("--remind", "--agent", "codex", "--session", "c1")
+        self.assertIn("holds the daily report lease for %s" % day, own.stdout)
+        self.assertIn("lease_renewed_at", self.read_request("daily", day))  # heartbeat
+        other = self.run_start("--remind", "--agent", "dsh", "--session", "d9")
+        self.assertEqual(other.stdout, "")
+
+    def test_startup_survives_unwritable_manifest(self):
+        self.enqueue(self.day)
+        (self.home / "MANIFEST.md").mkdir()   # write_text → IsADirectoryError
+        result = self.run_start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MANIFEST refresh skipped", result.stdout)
+        self.assertIn("next: claim report daily", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

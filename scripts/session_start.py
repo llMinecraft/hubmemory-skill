@@ -217,11 +217,9 @@ def _claimable_daily_candidates(agent, session):
         period = req.get("period", "")
         if not period or period >= today:
             continue
-        if req.get("status") == "claimed" and report_due.lease_active(req):
-            if req.get("claimed_by") == agent and req.get("claimed_session") == session:
-                owned.append(req)
-            else:
-                foreign.append(req)
+        mine = req.get("claimed_by") == agent and req.get("claimed_session") == session
+        if req.get("status") == "claimed" and report_due.lease_active(req, owner_present=mine):
+            (owned if mine else foreign).append(req)
             continue
         free.append(req)
     owned.sort(key=lambda r: r["period"], reverse=True)
@@ -246,18 +244,26 @@ def handoff(agent, session, model):
     last_error = None
     for req in candidates:
         period = req["period"]
-        if req.get("status") == "claimed" and report_due.lease_active(req):
+        mine = req.get("claimed_by") == agent and req.get("claimed_session") == session
+        if req.get("status") == "claimed" and report_due.lease_active(req, owner_present=mine):
             request = _full_request("daily", period)
             token = request.get("claim_token")
             if token:
                 action = "resumed"
+                renewed = report_due.renew_claim("daily", period, agent, session, token)
+                if renewed.get("ok"):
+                    request = _full_request("daily", period)
             else:
                 # Malformed claim without a token cannot be resumed; skip it
                 # rather than hand off a fabricated capability.
                 last_error = "active_lease_missing_token"
                 continue
         else:
-            result = report_due.claim_request("daily", period, agent, model, session)
+            try:
+                result = report_due.claim_request("daily", period, agent, model, session)
+            except OSError:
+                return {"ok": False, "error": "hub_not_writable",
+                        "hint": HUB_NOT_WRITABLE_HINT, "foreign_active_leases": []}
             if not result.get("ok"):
                 last_error = result.get("error")
                 continue
@@ -283,6 +289,59 @@ def handoff(agent, session, model):
     return result
 
 
+REMIND_RECENT_DAYS = 3
+
+
+def remind(agent, session):
+    """Cheap per-turn check (UserPromptSubmit hook / per-turn instruction).
+
+    Never claims. Its only write is renewing this session's own lease. Prints nothing when there is no
+    work, so ordinary turns cost zero tokens. Two cases speak up:
+      * this session owns a live, unpublished lease → finish and publish it
+        (the reminder also heartbeats via watcher activity, so the lease
+        stays alive while the session keeps working);
+      * a recent (last few days) daily is claimable and nobody holds it →
+        run the handoff now. Historical backlog never nags."""
+    today = datetime.now().date()
+    oldest = (today - timedelta(days=REMIND_RECENT_DAYS)).isoformat()
+    owned, claimable = [], []
+    for path in sorted(REQUESTS_DIR.glob("daily-*.json")):
+        req = report_due.read_request(path)
+        period = req.get("period", "")
+        if not req or req.get("status") == "done" or not period or period >= today.isoformat():
+            continue
+        mine = bool(agent and session and req.get("claimed_by") == agent
+                    and req.get("claimed_session") == session)
+        if req.get("status") == "claimed" and report_due.lease_active(req, owner_present=mine):
+            if mine:
+                owned.append(period)
+                # Host-verified owner turn = heartbeat (keeps long tasks safe
+                # even when the watcher cannot observe this client).
+                try:
+                    full = _full_request("daily", period)
+                    report_due.renew_claim("daily", period, agent, session,
+                                           full.get("claim_token"))
+                except OSError:
+                    pass
+            continue
+        if period >= oldest:
+            claimable.append(period)
+    handoff_cmd = ("%s %s --handoff --agent %s --model <current model> --session %s"
+                   % (sys.executable, SCRIPTS / "session_start.py",
+                      agent or "<agent>", session or "<session>"))
+    lines = []
+    if owned:
+        lines.append("hubmemory: this session holds the daily report lease for %s but has "
+                     "not published it. After answering the user, finish the 「全天总结」 "
+                     "and publish (re-run to get token + evidence + publish command): %s"
+                     % (", ".join(sorted(owned, reverse=True)), handoff_cmd))
+    elif claimable:
+        lines.append("hubmemory: daily report %s is waiting for an AI summary. Run the "
+                     "handoff now, write the overview, publish it: %s"
+                     % (max(claimable), handoff_cmd))
+    return lines
+
+
 def historical_backlog(pending):
     """Informational inventory only; never hide, delete, or defer requests."""
     from cold_storage import iter_day_files
@@ -297,12 +356,29 @@ def historical_backlog(pending):
     return sorted(result)
 
 
+HUB_NOT_WRITABLE_HINT = (
+    "~/hubmemory is not writable from this process (agent file sandbox). "
+    "Re-run this exact command with write access to ~/hubmemory "
+    "(DSH: bash sandbox_permissions=danger-full-access; Codex: approve the "
+    "escalation). Reading still works; claims/publish need write access.")
+
+
 def gather():
     watcher = watcher_status()
-    enqueued, today_note = detect_report_gaps()
-    manifest_mod.write_manifest()  # keep L0 fresh on every session start
+    warnings = []
+    try:
+        enqueued, today_note = detect_report_gaps()
+    except OSError as exc:
+        enqueued, today_note = [], None
+        warnings.append("gap detection skipped (%s): %s" % (exc.__class__.__name__, HUB_NOT_WRITABLE_HINT))
+    try:
+        manifest_mod.write_manifest()  # keep L0 fresh on every session start
+    except OSError as exc:
+        warnings.append("MANIFEST refresh skipped (%s); showing last written copy"
+                        % exc.__class__.__name__)
     pending = manifest_mod.pending_reports()
     return {
+        "warnings": warnings,
         "watcher": watcher,
         "enqueued_gaps": enqueued,
         "today_note": today_note,
@@ -326,12 +402,21 @@ def main():
                         "never inferred")
     parser.add_argument("--session", help="claiming session id "
                         "(default: DSH_SESSION_ID)")
+    parser.add_argument("--remind", action="store_true",
+                        help="read-only per-turn check: print a one-line "
+                             "reminder only when this session owns an "
+                             "unpublished lease or a recent daily is waiting")
     parser.add_argument("--handoff", action="store_true",
                         help="claim/resume the newest claimable daily report "
                              "for this identity and print the real claim "
                              "token, bounded evidence pack and publish "
                              "command instead of the manifest/backlog")
     args = parser.parse_args()
+    if args.remind:
+        identity, _ = resolve_identity(args.agent, args.session, args.model)
+        for line in remind(identity["agent"], identity["session"]):
+            print(line)
+        return 0
     data = gather()
 
     if args.handoff:
@@ -340,8 +425,12 @@ def main():
             result = {"ok": False, "error": "missing_" + "_".join(missing)}
         else:
             result = handoff(identity["agent"], identity["session"], identity["model"])
+        if not args.json:
+            for warning in data.get("warnings") or []:
+                print("warning: %s" % warning)
         if args.json:
             print(json.dumps({
+                "warnings": data["warnings"],
                 "watcher": data["watcher"],
                 "enqueued_gaps": data["enqueued_gaps"],
                 "today_note": data["today_note"],
@@ -366,6 +455,8 @@ def main():
         else:
             print("== hubmemory daily report handoff ==")
             print("handoff failed: %s" % result["error"])
+            if result.get("hint"):
+                print(result["hint"])
             if result["error"] == "missing_identity":
                 print("identity required: pass --agent and --session "
                       "(agent defaults to dsh and session to DSH_SESSION_ID "
@@ -395,6 +486,8 @@ def main():
         w["state"],
         (" (heartbeat %ss ago)" % w["heartbeat_age_s"]) if w.get("heartbeat_age_s") is not None else "",
     ))
+    for warning in data.get("warnings") or []:
+        print("warning: %s" % warning)
     if data["enqueued_gaps"]:
         print("enqueued missing diaries: %s" % ", ".join(data["enqueued_gaps"]))
     pending = data["pending_reports"]
