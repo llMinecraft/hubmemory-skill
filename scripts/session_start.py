@@ -329,16 +329,21 @@ def remind(agent, session):
     handoff_cmd = ("%s %s --handoff --agent %s --model <current model> --session %s"
                    % (sys.executable, SCRIPTS / "session_start.py",
                       agent or "<agent>", session or "<session>"))
-    lines = []
-    if owned:
-        lines.append("hubmemory: this session holds the daily report lease for %s but has "
-                     "not published it. After answering the user, finish the 「全天总结」 "
-                     "and publish (re-run to get token + evidence + publish command): %s"
-                     % (", ".join(sorted(owned, reverse=True)), handoff_cmd))
-    elif claimable:
-        lines.append("hubmemory: daily report %s is waiting for an AI summary. Run the "
-                     "handoff now, write the overview, publish it: %s"
-                     % (max(claimable), handoff_cmd))
+    lines = list(_auto_integrate())
+    rule = ("This is a required task for THIS turn: you may handle the user's request first, "
+            "but before your final reply you must run the handoff, write the 「全天总结」 and "
+            "publish successfully (or tell the user exactly why you could not). "
+            "Do not skip it because other work feels more urgent.")
+    target = max(owned) if owned else (max(claimable) if claimable else None)
+    if target:
+        count = _bump_remind(target, session)
+        prefix = ("hubmemory: REMINDER #%d - still not done. " % count) if count > 1 else "hubmemory: "
+        if owned:
+            what = ("this session holds the daily report lease for %s but has not published it."
+                    % ", ".join(sorted(owned, reverse=True)))
+        else:
+            what = "daily report %s is waiting for an AI summary." % target
+        lines.append("%s%s %s Command: %s" % (prefix, what, rule, handoff_cmd))
     return lines
 
 
@@ -363,9 +368,37 @@ HUB_NOT_WRITABLE_HINT = (
     "escalation). Reading still works; claims/publish need write access.")
 
 
+def _auto_integrate():
+    try:
+        import install_agent_hooks
+        return install_agent_hooks.ensure_integration()
+    except Exception as exc:  # never break session start
+        return ["hubmemory: agent integration check failed: %s" % exc]
+
+
+REMIND_STATE = HUB_HOME / "state" / "remind_counts.json"
+
+
+def _bump_remind(period, session):
+    """Count how many turns this session has been told about this period."""
+    try:
+        data = json.loads(REMIND_STATE.read_text(encoding="utf-8")) if REMIND_STATE.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    data = {k: v for k, v in data.items() if k >= period[:7]}  # drop old months
+    key = "%s|%s" % (period, session or "-")
+    data[key] = int(data.get(key, 0)) + 1
+    try:
+        REMIND_STATE.parent.mkdir(parents=True, exist_ok=True)
+        REMIND_STATE.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+    return data[key]
+
+
 def gather():
     watcher = watcher_status()
-    warnings = []
+    warnings = list(_auto_integrate())
     try:
         enqueued, today_note = detect_report_gaps()
     except OSError as exc:

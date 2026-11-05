@@ -122,6 +122,12 @@ def main():
     deps_ok = ensure_deps(args.check)
     watch_ok = ensure_watcher(args.check)
     try:
+        import install_agent_hooks
+        for line in install_agent_hooks.install_all(check=args.check):
+            say(line)
+    except Exception as exc:  # integration is best-effort; session_start retries
+        say("agent integration skipped: %s" % exc)
+    try:
         import manifest
         manifest.write_manifest()
         say("manifest refreshed")

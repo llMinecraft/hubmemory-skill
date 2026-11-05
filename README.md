@@ -121,6 +121,8 @@ python3 scripts/session_start.py --handoff --agent dsh --model <当前真实模�
 - 一键安装宿主 hook：`python3 scripts/install_agent_hooks.py`（`--check` 只检查）。
 - Claude / Codex：`SessionStart`（startup/resume/clear/compact）调 `agent_session_hook.py` 自动交接；`UserPromptSubmit` 每轮跑只读 `--remind`，无待办零输出，并为本会话租约心跳。Codex 自动写入 hook 信任与 `~/hubmemory` 可写根。身份缺失时输出让当前模型补齐的命令，不编造。
 - DSH：无宿主 hook；全局指令要求启动交接、每轮 `--remind`，`~/hubmemory` 写入被沙箱拒时提权重试。
+- **自动接入**：`bootstrap` 和每次 `session_start.py`（含 `--remind`）都会自检；缺少的 Claude/Codex hook、`~/.dsh/AGENTS.md` 与 `~/.codex/AGENTS.md` 里的 hubmemory 规则段会自动补上（模板在 `templates/agents_*.md`，只改 `<!-- hubmemory:begin/end -->` 之间，先备份 `*.bak_hubmemory_*`）。设 `HUBMEMORY_NO_AUTO_INSTALL=1` 只提示不修改。
+- **提醒升级**：`--remind` 的提示要求本回合回复前完成交接并 publish；同一会话被提醒后仍未处理，下一轮显示 `REMINDER #N`。
 - 租约：持有者 6 小时无活动才过期（watcher 活动 / remind / renew 均续期），绝对上限 72 小时；未被 watcher 观察到的幽灵会话 45 分钟释放。
 - 普通 `session_start.py` 不领取；输出为有限近期队列，完整旧待办可用 `report_due.py list --json` 查看。检索也先显示新待办，避免历史积压盖住昨日任务。
 - 所有接入仍依赖宿主确实执行 hook/指令；此修复不是所有 AI 客户端的运行时拦截器，不能承诺忽略指令的模型也必然完成。

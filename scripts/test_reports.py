@@ -20,7 +20,7 @@ class ReportsTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hubmemory-reports-test-")
         self.home = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {"HUBMEMORY_HOME": str(self.home), "HUBMEMORY_SKILL_DIR": str(SCRIPTS.parent), "DSH_SESSION_ID": "test-session"})
+        self.env = patch.dict(os.environ, {"HUBMEMORY_HOME": str(self.home), "HUBMEMORY_SKIP_INTEGRATION": "1", "HUBMEMORY_SKILL_DIR": str(SCRIPTS.parent), "DSH_SESSION_ID": "test-session"})
         self.env.start()
         import report_due, daily_report, monthly_report, backfill, session_start
         self.due = importlib.reload(report_due)

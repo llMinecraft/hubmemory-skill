@@ -33,6 +33,8 @@ python3 ~/.claude/skills/hubmemory/scripts/session_start.py --handoff \
 
 - **Claude / Codex**：宿主 hook 调 `scripts/agent_session_hook.py`（Codex 加 `--agent codex`）。`SessionStart`（startup/resume/clear/compact）自动交接；`UserPromptSubmit` 每轮跑 `session_start.py --remind`——无待办时零输出，有本会话未发布租约或近 3 天待领日报时输出一行提醒，并为本会话租约续期。Codex 的信任哈希从 Codex `hooks/list` 读回写入 `hooks.state`，`~/hubmemory` 加入 `sandbox_workspace_write.writable_roots`。每次触发记一行元数据到 `~/hubmemory/logs/agent_hooks.log`（不含提示词）。
 - **DSH**：无宿主 hook，`~/.dsh/AGENTS.md` 要求启动交接、每轮 `--remind`，写 `~/hubmemory` 被沙箱拒绝时提权重试同一命令。
+- **自动接入**：`bootstrap` 和每次 `session_start.py`（含 `--remind`）都会自检；缺少的 Claude/Codex hook、`~/.dsh/AGENTS.md` 与 `~/.codex/AGENTS.md` 里的 hubmemory 规则段会自动补上（模板在 `templates/agents_*.md`，只改 `<!-- hubmemory:begin/end -->` 之间，先备份 `*.bak_hubmemory_*`）。设 `HUBMEMORY_NO_AUTO_INSTALL=1` 只提示不修改。
+- **提醒升级**：`--remind` 的提示要求本回合回复前完成交接并 publish；同一会话被提醒后仍未处理，下一轮显示 `REMINDER #N`。
 - `session_start.py` 写不了 MANIFEST 时只警告不崩溃；领取写不了时返回 `hub_not_writable` 和提权提示。
 
 兼容手动方式，在回答用户之前检查待处理的日报/月报：

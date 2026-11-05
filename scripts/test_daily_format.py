@@ -33,7 +33,7 @@ class DailyFormatTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hubmemory-format-test-")
         self.home = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {"HUBMEMORY_HOME": str(self.home)})
+        self.env = patch.dict(os.environ, {"HUBMEMORY_HOME": str(self.home), "HUBMEMORY_SKIP_INTEGRATION": "1"})
         self.env.start()
         import daily_format, report_due
         self.fmt = importlib.reload(daily_format)

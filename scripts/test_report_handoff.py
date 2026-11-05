@@ -91,6 +91,7 @@ class HandoffTest(unittest.TestCase):
         if strip_dsh:
             env = {k: v for k, v in env.items() if not k.startswith("DSH_")}
         env["HUBMEMORY_HOME"] = str(self.home)
+        env["HUBMEMORY_SKIP_INTEGRATION"] = "1"
         env["HUBMEMORY_SKILL_DIR"] = str(SCRIPTS.parent)
         env.update(env_extra or {})
         return subprocess.run(
@@ -390,6 +391,15 @@ class HandoffTest(unittest.TestCase):
         self.assertIn("daily report %s is waiting" % day, result.stdout)
         self.assertIn("--handoff --agent codex", result.stdout)
         self.assertEqual(self.read_request("daily", day), before)
+
+    def test_remind_escalates_when_ignored(self):
+        day = self.recent(1)
+        self.enqueue(day)
+        first = self.run_start("--remind", "--agent", "dsh", "--session", "d1")
+        self.assertIn("required task for THIS turn", first.stdout)
+        self.assertNotIn("REMINDER #", first.stdout)
+        second = self.run_start("--remind", "--agent", "dsh", "--session", "d1")
+        self.assertIn("REMINDER #2", second.stdout)
 
     def test_remind_tells_owner_to_publish_held_lease(self):
         day = self.recent(1)

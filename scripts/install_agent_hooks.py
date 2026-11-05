@@ -8,8 +8,14 @@ Claude: ~/.claude/settings.json  SessionStart (handoff) + UserPromptSubmit (remi
 Codex : ~/.codex/hooks.json      same two events (--agent codex), plus
         ~/.codex/config.toml     hooks.state trust for exactly these handlers and
                                  sandbox_workspace_write.writable_roots += HUB_HOME
-DSH has no host hook surface; ~/.dsh/AGENTS.md carries the per-turn
-``session_start.py --remind`` and sandbox-escalation instructions instead.
+Global instructions: ~/.dsh/AGENTS.md (DSH has no host hooks) and
+~/.codex/AGENTS.md get one managed hubmemory block rendered from
+templates/agents_<agent>.md between BEGIN/END markers. Only that block is
+ever rewritten; an older unmarked "## Cross-agent shared memory (hubmemory)"
+section is migrated in place. User text outside the block is untouched.
+
+session_start.py calls ensure_integration() so a fresh install wires itself
+up the first time any agent uses the skill (opt out: HUBMEMORY_NO_AUTO_INSTALL=1).
 
 Codex trust: Codex refuses to run user hooks until their ``trusted_hash``
 is recorded. The hash is read back from Codex itself (``codex app-server``
@@ -41,6 +47,16 @@ CODEX_CONFIG = CODEX_HOME / "config.toml"
 CODEX_BINS = ("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
               "/Applications/Codex.app/Contents/Resources/codex")
 MARK = "agent_session_hook.py"
+SKILL_DIR = Path(__file__).resolve().parent.parent
+TEMPLATES = SKILL_DIR / "templates"
+STABLE_SKILL = HOME / ".claude" / "skills" / "hubmemory"
+SKILL_REF = ("~/.claude/skills/hubmemory" if STABLE_SKILL.exists()
+             and STABLE_SKILL.resolve() == SKILL_DIR else str(SKILL_DIR))
+BEGIN = "<!-- hubmemory:begin (managed by hubmemory install_agent_hooks.py; edits inside are overwritten) -->"
+END = "<!-- hubmemory:end -->"
+LEGACY_HEADING = "## Cross-agent shared memory (hubmemory)"
+INSTRUCTION_TARGETS = {"dsh": HOME / ".dsh" / "AGENTS.md", "codex": CODEX_HOME / "AGENTS.md"}
+STAMP = HUB_HOME / "state" / "agent_integration.json"
 
 
 def _backup(path):
@@ -186,12 +202,98 @@ def install_codex(check):
     return "codex: " + (", ".join(notes) if notes else "ok")
 
 
+def render_block(agent):
+    body = (TEMPLATES / ("agents_%s.md" % agent)).read_text(encoding="utf-8")
+    body = body.replace("{PY}", "/usr/bin/python3" if Path("/usr/bin/python3").exists()
+                        else sys.executable).replace("{SKILL}", SKILL_REF)
+    return "%s\n%s\n%s" % (BEGIN, body.rstrip(), END)
+
+
+def merge_instructions(text, block):
+    """Return text with exactly one managed block (pure; tested)."""
+    if BEGIN in text and END in text:
+        start = text.index(BEGIN)
+        stop = text.index(END, start) + len(END)
+        return text[:start] + block + text[stop:]
+    if LEGACY_HEADING in text:
+        start = text.index(LEGACY_HEADING)
+        nxt = start + len(LEGACY_HEADING)
+        stop = len(text)
+        for marker in ("\n## ", "\n# "):
+            pos = text.find(marker, nxt)
+            if pos != -1:
+                stop = min(stop, pos + 1)
+        tail = text[stop:]
+        return text[:start] + block + ("\n\n" + tail.lstrip("\n") if tail.strip() else "\n")
+    sep = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
+    if text and not text.endswith("\n\n"):
+        sep = "\n" if text.endswith("\n") else "\n\n"
+    return text + sep + block + "\n"
+
+
+def install_instructions(agent, check):
+    path = INSTRUCTION_TARGETS[agent]
+    if not path.parent.exists():
+        return "%s instructions: not installed (skipped)" % agent
+    old = path.read_text(encoding="utf-8") if path.exists() else ""
+    new = merge_instructions(old, render_block(agent))
+    if new == old:
+        return "%s instructions: ok" % agent
+    if check:
+        return "%s instructions: MISSING/outdated" % agent
+    _backup(path)
+    path.write_text(new, encoding="utf-8")
+    return "%s instructions: updated %s" % (agent, path)
+
+
+def install_all(check=False):
+    results = [install_claude(check), install_codex(check),
+               install_instructions("dsh", check), install_instructions("codex", check)]
+    return results
+
+
+def _fingerprint():
+    import hashlib
+    digest = hashlib.sha256()
+    for path in sorted(TEMPLATES.glob("agents_*.md")) + [Path(__file__).resolve()]:
+        digest.update(path.read_bytes())
+    for path in (CLAUDE_SETTINGS, CODEX_HOOKS, *INSTRUCTION_TARGETS.values()):
+        digest.update(str(path.exists()).encode())
+    return digest.hexdigest()[:16]
+
+
+def ensure_integration():
+    """Cheap self-heal called by session_start. Returns human-readable notes
+    only when something changed or needs attention; [] on the fast path."""
+    if os.environ.get("HUBMEMORY_SKIP_INTEGRATION") or "unittest" in sys.modules:
+        return []
+    try:
+        fp = _fingerprint()
+        if STAMP.exists() and json.loads(STAMP.read_text(encoding="utf-8")).get("fp") == fp:
+            return []
+        if os.environ.get("HUBMEMORY_NO_AUTO_INSTALL"):
+            missing = [r for r in install_all(check=True) if "MISSING" in r or "untrusted" in r]
+            return ["hubmemory: agent integration incomplete (%s); run python3 %s"
+                    % ("; ".join(missing), Path(__file__).resolve())] if missing else []
+        results = install_all(check=False)
+        STAMP.parent.mkdir(parents=True, exist_ok=True)
+        STAMP.write_text(json.dumps({"fp": _fingerprint(), "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                     "results": results}, ensure_ascii=False), encoding="utf-8")
+        changed = [r for r in results if any(w in r for w in ("installed", "written", "updated", "WARNING"))]
+        return ["hubmemory: wired agent integration (backups *.bak_hubmemory_*): " + "; ".join(changed)] if changed else []
+    except Exception as exc:  # never break session start
+        return ["hubmemory: agent integration check failed: %s" % exc]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    results = [install_claude(args.check), install_codex(args.check)]
+    results = install_all(args.check)
     print("\n".join(results))
+    if not args.check:
+        STAMP.parent.mkdir(parents=True, exist_ok=True)
+        STAMP.write_text(json.dumps({"fp": _fingerprint(), "results": results}, ensure_ascii=False), encoding="utf-8")
     bad = any(("MISSING" in r or "untrusted" in r or "incomplete" in r) for r in results)
     return 1 if bad else 0
 
