@@ -1014,7 +1014,21 @@ class DshParser:
                 meta["session_id"] = rec.get("id") or ""
                 meta["cwd"] = rec.get("cwd") or ""
                 meta["created"] = rec.get("createdAt")
+                # Forked/subagent sessions start with a copy of the parent's
+                # history ("seed"). Those rows already belong to the parent;
+                # re-emitting them under the child id would rewrite old days.
+                meta["in_seed"] = bool(rec.get("isSeeded"))
                 continue
+            if t == "session/end-seed":
+                # Copied history may itself contain nested end-seed markers
+                # from earlier forks, so the cutoff is createdAt, not this.
+                continue
+            if meta.get("in_seed"):
+                ts_seed = rec.get("time")
+                created = meta.get("created")
+                if not (isinstance(ts_seed, (int, float)) and isinstance(created, (int, float))
+                        and ts_seed >= created):
+                    continue
             if t == "agent-preset/selected":
                 meta["preset"] = data.get("agentPreset")
                 continue

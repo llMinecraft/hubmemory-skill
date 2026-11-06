@@ -240,7 +240,7 @@ def _forbidden_hit(text: str) -> str | None:
 COVERAGE_MIN_CHARS = 30  # sessions with only trivial text need no citation
 
 
-def validate_overview(text: str, mapping: dict[int, dict]) -> str:
+def validate_overview(text: str, mapping: dict[int, dict], require_coverage: bool = True) -> str:
     """Validate + normalize the AI overview. Returns canonical text whose
     citations [n] resolve against mapping; raises ValueError otherwise.
     Extra headings/content (full-report pastes, injected sections) reject.
@@ -283,6 +283,10 @@ def validate_overview(text: str, mapping: dict[int, dict]) -> str:
         raise ValueError("unknown_citations:" + ",".join(map(str, unknown)))
     # Coverage: every session in the evidence pack must be cited at least once,
     # so one busy session cannot crowd the rest of the day out of the summary.
+    # Only enforced when publishing; reports already published under the
+    # older rule stay valid (revalidation must not reopen finished days).
+    if not require_coverage:
+        return OVERVIEW_TITLE + "\n" + body.strip()
     cited_sessions = {mapping[n].get("session") for n in used}
     substantive = {mapping[n].get("session") for n in mapping
                    if mapping[n].get("chars", COVERAGE_MIN_CHARS) >= COVERAGE_MIN_CHARS}
@@ -588,7 +592,7 @@ def validate_assembled_report(text: str, period: str, ref_map: dict[int, dict] |
             if head not in overview:
                 raise ValueError("overview_subsections_mismatch")
     else:
-        canonical = validate_overview(overview, ref_map)
+        canonical = validate_overview(overview, ref_map, require_coverage=False)
         used = [int(n) for n in _CITATION_RE.findall(canonical)]
         expected_sources = "\n".join(render_sources(ref_map, used, hub_home)).strip()
         if expected_sources not in text:

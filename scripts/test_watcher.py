@@ -247,6 +247,35 @@ class DshInjectedNoiseTests(unittest.TestCase):
         self.assertEqual(self.w._clean_intent_text(">"), "")
         self.assertEqual(self.w._clean_intent_text("   "), "")
 
+    def test_seeded_subagent_history_is_not_reemitted(self) -> None:
+        created = 1_800_000_000_000
+        lines = [
+            json.dumps({"type": "session", "id": "child", "createdAt": created,
+                        "parentSession": "session-parent", "isSeeded": True}),
+            json.dumps({"type": "user/message", "time": created - 86_400_000,
+                        "data": {"content": "parent history from yesterday"}}),
+            json.dumps({"type": "session/end-seed", "seq": 2}),
+            json.dumps({"type": "user/message", "time": created - 3_600_000,
+                        "data": {"content": "grandparent history after nested end-seed"}}),
+            json.dumps({"type": "session/end-seed", "seq": 4}),
+            json.dumps({"type": "user/message", "time": created + 1000,
+                        "data": {"content": "child task prompt"}}),
+        ]
+        parser = self.w.DshParser()
+        parser.decompress = lambda _path: lines
+        texts = [e["text"] for e in parser.events(self.root / "child.zst")]
+        self.assertEqual(texts, ["child task prompt"])
+
+    def test_unseeded_session_keeps_all_rows(self) -> None:
+        lines = [
+            json.dumps({"type": "session", "id": "s", "createdAt": 1_800_000_000_000}),
+            json.dumps({"type": "user/message", "time": 1_799_000_000_000,
+                        "data": {"content": "imported earlier row"}}),
+        ]
+        parser = self.w.DshParser()
+        parser.decompress = lambda _path: lines
+        self.assertEqual(len(parser.events(self.root / "s.zst")), 1)
+
     def test_dsh_parser_noise_matches_reminders_but_not_real_prompts(self) -> None:
         parser = self.w.DshParser()
         self.assertTrue(parser.NOISE.search("<system-reminder>\nA skill is a reusable set"))
