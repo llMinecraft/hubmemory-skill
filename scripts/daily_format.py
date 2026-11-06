@@ -179,6 +179,7 @@ def ref_map_for(rows: list[dict]) -> dict[int, dict]:
             "ref": row["locator"],
             "agent": str(rec.get("agent") or "unknown"),
             "role": str(rec.get("role") or "?"),
+            "chars": len((rec.get("text") or "").strip()),
         }
     return mapping
 
@@ -220,6 +221,8 @@ def overview_prompt(period: str) -> str:
         f"你是日报全天总结作者。只输出 ## 全天总结 一节，日期 {period}。\n"
         "严格结构：## 全天总结 之后依次 ### 今天做了哪些事 / ### 主要结果 / ### 待办与阻塞，"
         "每节至少一条 '-' 要点，简洁中文，只依据给定 [n] 证据。\n"
+        "覆盖全天：证据来自多个会话，每个会话都要至少有一条要点引用到它的编号；"
+        "按工作主题归并，不要让某一个会话占满总结，子任务会话可并入相关主题。\n"
         "每个有依据的要点末尾标注引用编号如 [1][3]；不许编造编号，不许写任何 "
         "event_id、session、文件路径、代码、JSON、提示词或工具输出原文。\n"
         "状态口径：来源声称≠已验证，不确定写“未确认/待验证”。不要输出参考来源、"
@@ -232,6 +235,9 @@ def _forbidden_hit(text: str) -> str | None:
         if pattern.search(text):
             return code
     return None
+
+
+COVERAGE_MIN_CHARS = 30  # sessions with only trivial text need no citation
 
 
 def validate_overview(text: str, mapping: dict[int, dict]) -> str:
@@ -275,6 +281,20 @@ def validate_overview(text: str, mapping: dict[int, dict]) -> str:
     unknown = sorted({n for n in used if n not in mapping})
     if unknown:
         raise ValueError("unknown_citations:" + ",".join(map(str, unknown)))
+    # Coverage: every session in the evidence pack must be cited at least once,
+    # so one busy session cannot crowd the rest of the day out of the summary.
+    cited_sessions = {mapping[n].get("session") for n in used}
+    substantive = {mapping[n].get("session") for n in mapping
+                   if mapping[n].get("chars", COVERAGE_MIN_CHARS) >= COVERAGE_MIN_CHARS}
+    missing = {}
+    for n in sorted(mapping):
+        sess = mapping[n].get("session")
+        if sess not in cited_sessions and sess in substantive:
+            missing.setdefault(sess, []).append(n)
+    if missing:
+        raise ValueError("uncited_sessions:" + "; ".join(
+            "%s cite one of [%s]" % (sess, ",".join(map(str, nums)))
+            for sess, nums in missing.items()))
     return OVERVIEW_TITLE + "\n" + body.strip()
 
 

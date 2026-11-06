@@ -260,3 +260,24 @@ class DailyFormatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverviewCoverageTest(unittest.TestCase):
+    def _mapping(self):
+        long = "x" * 40
+        return {1: {"session": "a", "chars": 40}, 2: {"session": "b", "chars": 40},
+                3: {"session": "c", "chars": 3}}
+
+    def _text(self, refs):
+        return ("## 全天总结\n### 今天做了哪些事\n- 做了事%s\n### 主要结果\n- 有结果[1]\n"
+                "### 待办与阻塞\n- 待办[1]\n" % refs)
+
+    def test_rejects_uncited_substantive_session(self):
+        from daily_format import validate_overview
+        with self.assertRaises(ValueError) as ctx:
+            validate_overview(self._text("[1]"), self._mapping())
+        self.assertIn("uncited_sessions:b", str(ctx.exception))
+
+    def test_trivial_session_needs_no_citation(self):
+        from daily_format import validate_overview
+        validate_overview(self._text("[1][2]"), self._mapping())
