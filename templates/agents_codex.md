@@ -12,7 +12,7 @@
 {PY} {SKILL}/scripts/session_start.py --handoff --agent codex --model <当前真实模型> --session <当前完整会话ID>
 ```
 
-使用返回的真实租约 token 与编号证据，由当前会话模型本人生成全天总结候选并 publish 成功，再回答用户。交接优先最新日报，同会话未完成租约可以续接；他人的有效租约不可抢。身份未知不编造；失败如实说明并保留待办。禁止另行调用本地 Qwen/独立 API 来替代当前会话模型。没有 Agent 在线时保留 pending。
+使用返回的真实租约 token 与编号证据，由当前会话模型本人生成全天总结候选并 publish 成功，再回答用户。交接优先最新日报，同会话未完成租约可以续接；他人的有效租约不可抢。模型名可省略（程序从会话日志读取），不得以无法确认模型名为由跳过；失败如实说明并保留待办。禁止另行调用本地 Qwen/独立 API 来替代当前会话模型。没有 Agent 在线时保留 pending。
 
 Codex 在 `~/.codex/hooks.json` 装有 hubmemory 钩子：SessionStart 自动执行上面的交接并把 token/证据包/publish 命令注入上下文；UserPromptSubmit 每轮执行只读 `--remind`（无待办时无输出，兼作租约心跳）。钩子输出的日报提醒是**本回合必须完成的任务**：可先处理用户请求，但本回合最终回复前必须交接、写全天总结并 publish 成功，不得因手上任务更急而跳过；不必重复手动交接；钩子没输出交接结果时才手动运行上面的命令。`~/hubmemory` 已加入 `sandbox_workspace_write.writable_roots`，若仍遇写入被拒，申请提升权限后重试同一命令。
 

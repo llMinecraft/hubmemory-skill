@@ -177,6 +177,24 @@ def _env_dsh_present():
     return any(key.startswith("DSH_") for key in os.environ)
 
 
+def observed_model(session, agent=None):
+    """Model the watcher recorded from this session's own log file. It comes
+    from the client's transcript, not from the AI, so it is not fabricated.
+    Lets an AI that cannot introspect its model name still claim honestly."""
+    try:
+        data = json.loads((HUB_HOME / "live" / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sessions = data.get("sessions", data) if isinstance(data, dict) else {}
+    entry = sessions.get(session) if isinstance(sessions, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    if agent and entry.get("agent") and not str(entry.get("agent")).startswith(agent):
+        return None
+    model = str(entry.get("model") or "").strip()
+    return model if model and model not in ("unknown", "deepseek") else None
+
+
 def resolve_identity(agent=None, session=None, model=None):
     """Resolve the claim identity. Never fabricate a model name: it must come
     from --model or a trustworthy harness environment variable."""
@@ -187,6 +205,8 @@ def resolve_identity(agent=None, session=None, model=None):
                 "model": model or next(
                     (os.environ[key] for key in TRUSTED_MODEL_ENV
                      if os.environ.get(key)), None)}
+    if (not resolved["model"] or resolved["model"] == "unknown") and resolved["session"]:
+        resolved["model"] = observed_model(resolved["session"], resolved["agent"])
     missing = []
     if not resolved["agent"] or resolved["agent"] == "unknown" or not resolved["session"]:
         missing.append("identity")
@@ -326,9 +346,11 @@ def remind(agent, session):
             continue
         if period >= oldest:
             claimable.append(period)
-    handoff_cmd = ("%s %s --handoff --agent %s --model <current model> --session %s"
+    known_model = observed_model(session, agent) if session else None
+    handoff_cmd = ("%s %s --handoff --agent %s --session %s%s"
                    % (sys.executable, SCRIPTS / "session_start.py",
-                      agent or "<agent>", session or "<session>"))
+                      agent or "<agent>", session or "<session>",
+                      "" if known_model else " --model <current model>"))
     lines = list(_auto_integrate())
     rule = ("This is a required task for THIS turn: you may handle the user's request first, "
             "but before your final reply you must run the handoff, write the 「全天总结」 and "

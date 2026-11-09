@@ -194,6 +194,17 @@ class HandoffTest(unittest.TestCase):
         # Agent defaults to dsh when a DSH_* env is present.
         self.assertEqual(req["claimed_by"], "dsh")
 
+    def test_handoff_uses_model_recorded_from_session_log(self):
+        self.enqueue(self.day)
+        live = self.home / "live"
+        live.mkdir(parents=True, exist_ok=True)
+        (live / "index.json").write_text(json.dumps({"sessions": {
+            "s-live": {"agent": "dsh", "model": "gpt-6.1-sol"}}}))
+        result, payload = self.handoff_json("--agent", "dsh", "--session", "s-live")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        req = self.read_request("daily", self.day)
+        self.assertEqual(req["claimed_model"], "gpt-6.1-sol")
+
     def test_handoff_resumes_same_owner_active_lease_without_duplicating(self):
         self.enqueue(self.day)
         _, first = self.handoff_json(

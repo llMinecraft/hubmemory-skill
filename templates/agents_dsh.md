@@ -9,7 +9,7 @@
 它做 watcher 健康检查、补登缺失日报、刷新 `~/hubmemory/MANIFEST.md`。**启动、恢复、压缩续接，以及跨日后的首轮都必须执行日报交接，不只查看提示：**
 
 ```bash
-{PY} {SKILL}/scripts/session_start.py --handoff --agent dsh --model <当前会话真实模型名> --session "$DSH_SESSION_ID"
+{PY} {SKILL}/scripts/session_start.py --handoff --agent dsh --session "$DSH_SESSION_ID"
 ```
 
 交接会领取最近一个可领取日报，并给出实际 token、编号证据包和 publish 命令；同会话未完成租约会续接，不重复领取。
@@ -21,7 +21,7 @@
   `{PY} {SKILL}/scripts/session_start.py --remind --agent dsh --session "$DSH_SESSION_ID"`。
   有输出就是**本回合必须完成的任务**：可以先处理用户当前的请求，但**本回合最终回复前**必须执行它给出的 `--handoff`、写全天总结并 publish 成功；做不到要在回复里明确说明原因。不得因为手上任务更急就跳过或留到以后。此命令兼作租约心跳，长任务超过 6 小时也不会被其他 Agent 抢走。
 
-**当前会话模型本人生成总结并成功 publish 后，才回复用户；不得仅报告 pending 或把 claim 当完成。** 若身份未知、他人有效租约、校验失败，应如实说明并保留待办。没有使用中的 Agent 时保留 pending，不自动启动本地模型，不另开 API 调用或切换 Qwen。普通查看状态不领取任务。
+**当前会话模型本人生成总结并成功 publish 后，才回复用户；不得仅报告 pending 或把 claim 当完成。** 模型名可省略：程序从本会话日志读取真实模型，**不得以“无法确认模型名”为由跳过**；只有他人有效租约或校验失败才如实说明并保留待办。没有使用中的 Agent 时保留 pending，不自动启动本地模型，不另开 API 调用或切换 Qwen。普通查看状态不领取任务。
 
 ### 协作规则
 
