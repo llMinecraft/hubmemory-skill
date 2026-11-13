@@ -124,6 +124,20 @@ def owner_session_activity(session):
     return _parse_ts(entry.get("last_activity"))
 
 
+# A claim does not stay open just because the owner keeps chatting. After
+# this long without publish or explicit renew, the lease is released.
+OWNER_CLAIM_TIMEOUT = timedelta(hours=4)
+
+
+def _activity_after_claim(request):
+    """Watcher-observed owner activity that occurred after the claim itself."""
+    claimed = _parse_ts(request.get("claimed_at"))
+    activity = owner_session_activity(request.get("claimed_session"))
+    if claimed is not None and activity is not None and activity > claimed:
+        return activity
+    return None
+
+
 def lease_last_seen(request):
     """Newest owner liveness signal: claim, explicit renew, session activity."""
     claimed = _parse_ts(request.get("claimed_at"))
@@ -151,10 +165,21 @@ def lease_active(request, owner_present=False):
     if seen is None:
         return False
     observed = owner_present \
-        or owner_session_activity(request.get("claimed_session")) is not None \
+        or _activity_after_claim(request) is not None \
         or request.get("lease_renewed_at")
     window = CLAIM_TIMEOUT if observed else GHOST_TIMEOUT
-    return current - seen < window
+    if current - seen < window:
+        return True
+    # Activity alone cannot hold a claim indefinitely: if the owner has been
+    # chatting but never published or renewed, the window shortens to
+    # OWNER_CLAIM_TIMEOUT so the lease is released before CLAIM_TIMEOUT.
+    if not owner_present and not request.get("lease_renewed_at"):
+        # The owner never came back to publish. Treat it as a ghost even if it
+        # was still chatting elsewhere; the claim is released after
+        # OWNER_CLAIM_TIMEOUT of total elapsed time.
+        if current - claimed >= OWNER_CLAIM_TIMEOUT:
+            return False
+    return False
 
 
 def lease_state(request):
